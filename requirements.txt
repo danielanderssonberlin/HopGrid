@@ -1,0 +1,6 @@
+mss
+opencv-python
+numpy
+pynput
+Pillow
+cryptography

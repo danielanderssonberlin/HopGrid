@@ -1,0 +1,68 @@
+name: Build
+
+# Baut die Windows-.exe und die macOS-Apps.
+# Manuell starten (Actions > Build > Run workflow) oder per Tag v* -> Release mit Downloads.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        shell: cmd
+        run: build_windows.bat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HopGrid-Windows
+          path: |
+            dist/HopGrid-Host.exe
+            dist/HopGrid-Client.exe
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest   # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: bash build_mac.sh
+      - name: Rename
+        run: |
+          cd dist
+          mv HopGrid-Host-macOS.zip HopGrid-Host-macOS-${{ matrix.arch }}.zip
+          mv HopGrid-Client-macOS.zip HopGrid-Client-macOS-${{ matrix.arch }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HopGrid-macOS-${{ matrix.arch }}
+          path: dist/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
