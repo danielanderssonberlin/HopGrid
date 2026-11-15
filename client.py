@@ -193,6 +193,7 @@ class ClientApp:
         self.last_send = 0.0
         self.cmd_as_ctrl = bool(args.cmd_as_ctrl)
         self.share_clipboard = True
+        self.show_remote_cursor = True
         self.clip_last = None         # zuletzt abgeglichener Text der Zwischenablage
         self.clip_incoming = None     # vom Host empfangener Text (setzt der Hauptthread)
 
@@ -264,9 +265,13 @@ class ClientApp:
                         self.remember_var).pack(anchor="w", pady=(ui.S1, ui.S1))
         self.clip_var = tk.BooleanVar(value=bool(saved.get("share_clipboard", True)))
         ui.checkbox(form, "Zwischenablage teilen (Kopieren & Einfügen)",
-                    self.clip_var).pack(anchor="w", pady=(ui.S1, 0))
+                    self.clip_var).pack(anchor="w", pady=(ui.S1, ui.S1))
+        self.cursor_var = tk.BooleanVar(value=bool(saved.get("show_remote_cursor", True)))
+        ui.checkbox(form, "Mauszeiger des anderen Rechners anzeigen",
+                    self.cursor_var).pack(anchor="w", pady=(ui.S1, 0))
 
-        advanced = ui.Collapsible(form, "Erweitert").pack(fill="x", pady=(ui.S2, 0))
+        advanced = ui.Collapsible(form, "Erweitert", on_toggle=self.fit_window
+                                  ).pack(fill="x", pady=(ui.S2, 0))
         self.advanced = advanced
         self.f_port = ui.Field(advanced.body, "Port",
                                str(self.args.port or saved.get("port", proto.DEFAULT_PORT)),
@@ -285,6 +290,7 @@ class ClientApp:
         self.connect_btn.pack(fill="x", pady=(ui.S3, 0))
 
         self.root.bind("<Return>", lambda _e: self.start_connect())
+        self.root.after(10, self.fit_window)
         first = next((f for f in (self.f_host, self.f_user, self.f_pw) if not f.get()), self.f_pw)
         first.entry.focus_set()
 
@@ -313,6 +319,14 @@ class ClientApp:
 
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(100, check)
+
+    def fit_window(self):
+        """Fensterhöhe an den Inhalt anpassen (kein Scrollen nötig)."""
+        try:
+            self.root.update_idletasks()
+            self.root.tk.call("wm", "geometry", self.root._w, "")
+        except tk.TclError:
+            pass
 
     def set_status(self, text, kind="error"):
         color = {"error": ui.DANGER, "info": ui.MUTED}[kind]
@@ -356,6 +370,7 @@ class ClientApp:
             child.destroy()
         hosts = self._search_result
         self.results.pack(fill="x", pady=(0, ui.S2), after=self.f_host.frame.master)
+        self.root.after(10, self.fit_window)
         if not hosts:
             ui.label(self.results, "Kein freigegebener Rechner gefunden. Läuft auf dem anderen "
                                    "Rechner die Freigabe?", "small", ui.MUTED, anchor="w",
@@ -407,10 +422,12 @@ class ClientApp:
         remember = self.remember_var.get()
         self.cmd_as_ctrl = self.cmd_var.get()
         self.share_clipboard = self.clip_var.get()
+        self.show_remote_cursor = self.cursor_var.get()
         # Einstellungen sofort merken, nicht erst nach erfolgreicher Verbindung
         save_settings({"host": host, "port": port, "user": user,
                        "remember_password": remember, "cmd_as_ctrl": self.cmd_as_ctrl,
-                       "share_clipboard": self.share_clipboard})
+                       "share_clipboard": self.share_clipboard,
+                       "show_remote_cursor": self.show_remote_cursor})
 
         self.connect_btn.configure(state="disabled", text="Verbinde …")
         self._connect_result = None
@@ -572,7 +589,7 @@ class ClientApp:
     def _draw_remote_cursor(self):
         """Mauszeiger des Hosts an seiner Position über das Bild zeichnen."""
         pos = getattr(self, "remote_pos", None)
-        if pos is None or not self.view:
+        if pos is None or not self.view or not self.show_remote_cursor:
             return
         nx, ny, visible = pos
         ox, oy, dw, dh = self.view
@@ -709,7 +726,6 @@ class ClientApp:
         self.window_sized = False
         self.pressed_keys.clear()
         self.root.title("HopGrid – Verbinden")
-        self.root.geometry("520x640")
         self._build_login(message)
 
     # ----------------------------- Eingaben -----------------------------
@@ -822,7 +838,7 @@ def main():
     enable_dpi_awareness()
     ui.setup()
     root = ctk.CTk()
-    root.geometry("520x640")
+    root.minsize(500, 300)
     ui.set_window_icon(root)
     ClientApp(root, args)
     root.mainloop()

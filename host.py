@@ -1041,28 +1041,29 @@ class HostWindow:
         self.frame = ctk.CTkFrame(root, fg_color=ui.BG)
         self.frame.pack(fill="both", expand=True)
         head = ui.header(self.frame, "Diesen Rechner freigeben",
-                         "Ein anderer Rechner im Netz darf diesen Bildschirm sehen und steuern.",
+                         "Ein anderer Rechner darf diesen Bildschirm sehen und steuern.",
                          on_back=self.go_back if on_back else None)
         self.back_button = getattr(head, "back_button", None)
 
-        # Inhalt scrollbar, damit auf kleinen Bildschirmen nichts abgeschnitten wird
-        body = ctk.CTkScrollableFrame(self.frame, fg_color="transparent",
-                                      scrollbar_button_color=ui.BORDER,
-                                      scrollbar_button_hover_color=ui.MUTED)
-        body.pack(fill="both", expand=True, padx=(ui.S4 - 4, ui.S2), pady=(ui.S2, ui.S3))
+        body = ctk.CTkFrame(self.frame, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=ui.S4, pady=(0, ui.S3))
+        pad = {"padx": ui.S3 + 4, "pady": ui.S3}
 
-        # --- Status ---
+        # --- Status: Plakette + Name in einer Zeile, darunter Adresse und Knopf ---
         status = ui.card(body)
         status.pack(fill="x", pady=(0, ui.S3))
         inner = ctk.CTkFrame(status, fg_color="transparent")
-        inner.pack(fill="x", padx=ui.S3 + 4, pady=ui.S3)
-        self.badge = ui.Badge(inner)
-        self.badge.widget.pack(anchor="w")
-        self.headline = ui.label(inner, "Freigabe ist aus", "h2", anchor="w")
-        self.headline.pack(anchor="w", pady=(ui.S2 + 4, 0))
+        inner.pack(fill="x", **pad)
+        top = ctk.CTkFrame(inner, fg_color="transparent")
+        top.pack(fill="x")
+        self.headline = ui.label(top, "Freigabe ist aus", "h2", anchor="w")
+        self.headline.pack(side="left")
+        self.badge = ui.Badge(top)
+        self.badge.widget.pack(side="right")
         self.subline = ui.label(inner, "Lege Zugangsdaten fest und starte die Freigabe.",
                                 "small", ui.MUTED, anchor="w", justify="left", wraplength=440)
-        self.subline.pack(anchor="w", pady=(2, ui.S3))
+        self.subline.pack(anchor="w", pady=(2, ui.S2 + 4))
+        self.status_inner = inner
         self.button = ui.primary_button(inner, "Freigabe starten", self.toggle)
         self.button.pack(fill="x")
         self.form_error = ui.label(inner, "", "small", ui.DANGER, anchor="w", justify="left",
@@ -1071,26 +1072,33 @@ class HostWindow:
 
         # --- Zugang ---
         access = ui.card(body)
-        access.pack(fill="x", pady=(0, ui.S3))
+        access.pack(fill="x", pady=(0, ui.S2))
         form = ctk.CTkFrame(access, fg_color="transparent")
-        form.pack(fill="x", padx=ui.S3 + 4, pady=ui.S3)
-        ui.label(form, "Zugang", "h3").pack(anchor="w", pady=(0, ui.S2))
-        self.f_alias = ui.Field(form, "Name im Netz (Alias)",
-                                args.alias or saved.get("alias") or default_alias(),
-                                hint="Unter diesem Namen findet dich der andere Rechner.")
-        self.f_alias.pack(fill="x", pady=(0, ui.S2))
-        self.f_user = ui.Field(form, "Benutzername", args.user or saved.get("user", ""))
-        self.f_user.pack(fill="x", pady=(0, ui.S2))
-        pw_row = ctk.CTkFrame(form, fg_color="transparent")
-        pw_row.pack(fill="x", pady=(0, ui.S2))
-        pw_row.grid_columnconfigure((0, 1), weight=1, uniform="pw")
-        self.f_pw = ui.Field(pw_row, "Passwort", secret=True)
+        form.pack(fill="x", **pad)
+        names = ctk.CTkFrame(form, fg_color="transparent")
+        names.pack(fill="x", pady=(0, ui.S2))
+        names.grid_columnconfigure((0, 1), weight=1, uniform="names")
+        self.f_alias = ui.Field(names, "Name im Netz (Alias)",
+                                args.alias or saved.get("alias") or default_alias(), wrap=210)
+        self.f_alias.grid(row=0, column=0, sticky="new", padx=(0, ui.S2))
+        self.f_user = ui.Field(names, "Benutzername", args.user or saved.get("user", ""), wrap=210)
+        self.f_user.grid(row=0, column=1, sticky="new")
+
+        # Passwort: gespeichert -> eine Zeile mit "Ändern", sonst zwei Felder
+        self.pw_saved_row = ctk.CTkFrame(form, fg_color="transparent")
+        ui.label(self.pw_saved_row, "✓  Passwort ist gespeichert", "body", ui.SUCCESS
+                 ).pack(side="left")
+        self.pw_change_btn = ui.secondary_button(self.pw_saved_row, "Ändern",
+                                                 self._show_pw_fields, width=80, height=30)
+        self.pw_change_btn.pack(side="right")
+        self.pw_fields = ctk.CTkFrame(form, fg_color="transparent")
+        self.pw_fields.grid_columnconfigure((0, 1), weight=1, uniform="pw")
+        self.f_pw = ui.Field(self.pw_fields, "Passwort", secret=True, wrap=210)
         self.f_pw.grid(row=0, column=0, sticky="new", padx=(0, ui.S2))
-        self.f_pw2 = ui.Field(pw_row, "Passwort wiederholen", secret=True)
+        self.f_pw2 = ui.Field(self.pw_fields, "Passwort wiederholen", secret=True, wrap=210)
         self.f_pw2.grid(row=0, column=1, sticky="new")
-        self.pw_hint = ui.label(form, "", "small", ui.MUTED, anchor="w", justify="left",
-                                wraplength=440)
-        self.pw_hint.pack(anchor="w")
+        self.pw_anchor = ctk.CTkFrame(form, fg_color="transparent", height=1)
+        self.pw_anchor.pack(fill="x")
         self._update_pw_hint()
 
         self.remember_var = tk.BooleanVar(value=saved.get("remember", True))
@@ -1101,7 +1109,11 @@ class HostWindow:
             ui.checkbox(form, "Bei der Anmeldung automatisch starten und freigeben",
                         self.autostart_var, self.on_autostart_toggle).pack(anchor="w",
                                                                            pady=(ui.S1, 0))
-        advanced = ui.Collapsible(form, "Erweitert").pack(fill="x", pady=(ui.S2, 0))
+
+        # --- Eingeklappt: Erweitert, Protokoll ---
+        folds = ctk.CTkFrame(body, fg_color="transparent")
+        folds.pack(fill="both", expand=True)
+        advanced = ui.Collapsible(folds, "Erweitert", on_toggle=self.fit_window).pack(fill="x")
         self.advanced = advanced
         self.f_port = ui.Field(advanced.body, "Port",
                                str(args.port or saved.get("port", proto.DEFAULT_PORT)),
@@ -1109,20 +1121,24 @@ class HostWindow:
                                width=120)
         self.f_port.pack(anchor="w", pady=(ui.S1, 0))
         ui.secondary_button(advanced.body, "Beim Schließen wieder fragen",
-                            self._forget_close_action).pack(anchor="w", pady=(ui.S2, 0))
+                            self._forget_close_action).pack(anchor="w", pady=(ui.S2, ui.S1))
         self.fields = [self.f_alias, self.f_user, self.f_pw, self.f_pw2, self.f_port]
 
-        # --- Protokoll ---
-        log_section = ui.Collapsible(body, "Protokoll").pack(fill="both", expand=True)
+        log_section = ui.Collapsible(folds, "Protokoll", on_toggle=self.fit_window
+                                     ).pack(fill="both", expand=True)
         self.logbox = ctk.CTkTextbox(log_section.body, height=130, corner_radius=8,
                                      border_width=1, border_color=ui.BORDER, fg_color=ui.CARD,
                                      text_color=ui.TEXT, font=ui.font("mono"), wrap="word")
         self.logbox.pack(fill="both", expand=True)
         self.logbox.configure(state="disabled")
         self.log_section = log_section
+        self.root.after(10, self.fit_window)
 
         root.bind("<Return>", lambda _e: self.toggle() if self.server is None else None)
-        (self.f_pw if self.f_user.get() else self.f_user).entry.focus_set()
+        if not self.f_user.get():
+            self.f_user.entry.focus_set()
+        elif self.saved_creds is None:
+            self.f_pw.entry.focus_set()
         root.after(150, self.poll_queues)
 
         if autostart_launch:
@@ -1144,18 +1160,29 @@ class HostWindow:
             return None
 
     def _update_pw_hint(self):
-        text = ""
-        placeholder = ""
-        if self.saved_creds is not None:
-            text = "✓  Passwort ist gespeichert – Felder leer lassen, um es weiter zu nutzen."
-            placeholder = "Gespeichert"
-        for field in (self.f_pw, self.f_pw2):
-            field.set_placeholder(placeholder)
-        self.pw_hint.configure(text=text, text_color=ui.SUCCESS)
-        if text:
-            self.pw_hint.pack(anchor="w")
+        """Gespeichertes Passwort: nur eine Zeile mit 'Ändern'. Sonst die zwei Felder."""
+        if self.saved_creds is not None and not self.f_pw.get() and not self.f_pw2.get():
+            self.pw_fields.pack_forget()
+            self.pw_saved_row.pack(fill="x", pady=(ui.S1, ui.S1), before=self.pw_anchor)
         else:
-            self.pw_hint.pack_forget()
+            self.pw_saved_row.pack_forget()
+            self.pw_fields.pack(fill="x", before=self.pw_anchor)
+        self.fit_window()
+
+    def _show_pw_fields(self):
+        self.pw_saved_row.pack_forget()
+        self.pw_fields.pack(fill="x", before=self.pw_anchor)
+        self.f_pw.set_hint("Leer lassen = gespeichertes Passwort behalten.")
+        self.f_pw.entry.focus_set()
+        self.fit_window()
+
+    def fit_window(self):
+        """Fensterhöhe an den Inhalt anpassen (kein Scrollen nötig)."""
+        try:
+            self.root.update_idletasks()
+            self.root.tk.call("wm", "geometry", self.root._w, "")
+        except tk.TclError:
+            pass
 
     def show_error(self, text):
         self.form_error.configure(text=text)
@@ -1173,13 +1200,14 @@ class HostWindow:
     def _set_running_ui(self, running, alias="", address=""):
         for field in self.fields:
             field.set_state(not running)
+        self.pw_change_btn.configure(state="disabled" if running else "normal")
         if self.back_button is not None:
             self.back_button.configure(state="disabled" if running else "normal")
         self.button.destroy()
-        parent = self.headline.master
+        parent = self.status_inner
         if running:
             self.button = ui.danger_button(parent, "Freigabe stoppen", self.toggle)
-            self.badge.set("active", "Freigabe aktiv – wartet auf Verbindung")
+            self.badge.set("active", "Wartet auf Verbindung")
             self.headline.configure(text=f"„{alias}“")
             self.subline.configure(text=f"Im Netz erreichbar als „{alias}“ oder unter {address}.")
         else:
@@ -1419,9 +1447,9 @@ class HostWindow:
             elif item[0] == "status" and self.server is not None:
                 _, event, ip = item
                 if event == "connected":
-                    self.badge.set("busy", f"Verbunden mit {ip}")
+                    self.badge.set("busy", f"Verbunden: {ip}")
                 else:
-                    self.badge.set("active", "Freigabe aktiv – wartet auf Verbindung")
+                    self.badge.set("active", "Wartet auf Verbindung")
         lines = []
         while True:
             try:
@@ -1498,7 +1526,7 @@ def run_gui(args):
     ui.setup()
     root = ctk.CTk()
     root.configure(fg_color=ui.BG)
-    root.geometry("560x720")
+    root.minsize(540, 300)
     ui.set_window_icon(root)
     HostWindow(root, args, autostart_launch=getattr(args, "autostart", False))
     root.mainloop()

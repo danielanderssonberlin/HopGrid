@@ -141,19 +141,22 @@ def card(parent, **kw):
 
 
 def primary_button(parent, text, command, **kw):
-    return ctk.CTkButton(parent, text=text, command=command, height=40, corner_radius=8,
+    kw.setdefault("height", 40)
+    return ctk.CTkButton(parent, text=text, command=command, corner_radius=8,
                          fg_color=PRIMARY, hover_color=PRIMARY_HOVER, text_color="#FFFFFF",
                          font=font("button"), **kw)
 
 
 def secondary_button(parent, text, command, **kw):
-    return ctk.CTkButton(parent, text=text, command=command, height=36, corner_radius=8,
+    kw.setdefault("height", 36)
+    return ctk.CTkButton(parent, text=text, command=command, corner_radius=8,
                          fg_color=SECONDARY, hover_color=SECONDARY_HOVER, text_color=TEXT,
                          font=font("button"), **kw)
 
 
 def danger_button(parent, text, command, **kw):
-    return ctk.CTkButton(parent, text=text, command=command, height=40, corner_radius=8,
+    kw.setdefault("height", 40)
+    return ctk.CTkButton(parent, text=text, command=command, corner_radius=8,
                          fg_color=DANGER_BG, hover_color=DANGER_HOVER, text_color=DANGER,
                          font=font("button"), **kw)
 
@@ -172,7 +175,8 @@ def label(parent, text="", kind="body", color=TEXT, **kw):
 class Field:
     """Beschriftetes Eingabefeld mit Fehlertext direkt darunter."""
 
-    def __init__(self, parent, title, value="", secret=False, hint="", width=0, placeholder=""):
+    def __init__(self, parent, title, value="", secret=False, hint="", width=0, placeholder="",
+                 wrap=440):
         self.frame = ctk.CTkFrame(parent, fg_color="transparent")
         label(self.frame, title, "small", MUTED).pack(anchor="w")
         self.entry = ctk.CTkEntry(self.frame, height=36, corner_radius=8, border_width=1,
@@ -184,7 +188,8 @@ class Field:
         self.entry.pack(fill="x", pady=(S1, 0))
         if value:
             self.entry.insert(0, value)
-        self.message = label(self.frame, hint, "small", MUTED, anchor="w", justify="left")
+        self.message = label(self.frame, hint, "small", MUTED, anchor="w", justify="left",
+                             wraplength=wrap)
         self._hint = hint
         if hint:
             self.message.pack(anchor="w", fill="x")
@@ -270,18 +275,20 @@ class Badge:
 def header(parent, title, subtitle="", on_back=None):
     """Kopfzeile: optional Zurück, Logo, Titel, Untertitel."""
     bar = ctk.CTkFrame(parent, fg_color="transparent")
-    bar.pack(fill="x", padx=S4, pady=(S3, S2))
-    if on_back is not None:
-        back = ctk.CTkButton(bar, text="‹  Zurück", command=on_back, width=90, height=30,
-                             corner_radius=8, fg_color="transparent", hover_color=SECONDARY,
-                             text_color=PRIMARY, font=font("body"), anchor="w")
-        back.pack(anchor="w", pady=(0, S2))
-        bar.back_button = back
+    bar.pack(fill="x", padx=S4, pady=(S3, S3))
     row = ctk.CTkFrame(bar, fg_color="transparent")
     row.pack(fill="x")
-    logo = app_logo(36)
-    if logo is not None:
-        ctk.CTkLabel(row, image=logo, text="").pack(side="left", padx=(0, 12))
+    if on_back is not None:
+        # Kompakt: Zurück steht in derselben Zeile wie der Titel (statt des Logos)
+        back = ctk.CTkButton(row, text="‹ Zurück", command=on_back, width=84, height=32,
+                             corner_radius=8, fg_color=SECONDARY, hover_color=SECONDARY_HOVER,
+                             text_color=TEXT, font=font("small"))
+        back.pack(side="left", padx=(0, 14), anchor="n", pady=(2, 0))
+        bar.back_button = back
+    else:
+        logo = app_logo(36)
+        if logo is not None:
+            ctk.CTkLabel(row, image=logo, text="").pack(side="left", padx=(0, 12))
     texts = ctk.CTkFrame(row, fg_color="transparent")
     texts.pack(side="left", fill="x", expand=True)
     label(texts, title, "title").pack(anchor="w")
@@ -338,9 +345,10 @@ class ChoiceCard:
 class Collapsible:
     """Ein-/ausklappbarer Bereich (z. B. 'Erweitert', 'Protokoll')."""
 
-    def __init__(self, parent, title, open_=False):
+    def __init__(self, parent, title, open_=False, on_toggle=None):
         self.outer = ctk.CTkFrame(parent, fg_color="transparent")
         self.title = title
+        self.on_toggle = on_toggle
         self.button = ctk.CTkButton(self.outer, text="", command=self.toggle, height=28,
                                     fg_color="transparent", hover_color=SECONDARY,
                                     text_color=MUTED, font=font("small"), anchor="w")
@@ -359,6 +367,8 @@ class Collapsible:
     def toggle(self):
         self.is_open = not self.is_open
         self._render()
+        if self.on_toggle is not None:
+            self.on_toggle()
 
     def pack(self, **kw):
         self.outer.pack(**kw)

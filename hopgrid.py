@@ -83,23 +83,21 @@ class App:
     def open_start(self):
         self._clear()
         self.root.title("HopGrid")
-        self.root.geometry("520x420")
-        self.root.minsize(460, 400)
+        self.root.minsize(480, 300)
+        self.root.after(10, lambda: self.root.tk.call("wm", "geometry", self.root._w, ""))
         self.screen = StartScreen(self.root, self.open_host, self.open_client)
 
     def open_host(self, with_back=True):
         import host  # lädt OpenCV/mss/pynput erst, wenn sie gebraucht werden
         self._clear()
-        self.root.geometry("560x720")
-        self.root.minsize(500, 600)
+        self.root.minsize(540, 300)  # Höhe passt sich dem Inhalt an
         self.screen = host.HostWindow(self.root, self.args, autostart_launch=self.args.autostart,
                                       on_back=self.open_start if with_back else None)
 
     def open_client(self, with_back=True):
         import client
         self._clear()
-        self.root.geometry("520x640")
-        self.root.minsize(460, 560)
+        self.root.minsize(500, 300)  # Höhe passt sich dem Inhalt an
         self.screen = client.ClientApp(self.root, self.args,
                                        on_back=self.open_start if with_back else None)
 
