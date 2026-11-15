@@ -9,3 +9,4 @@ LAN-Remote-Desktop (macOS/Windows), Python. Gebaut 15.11.2026.
 - Repo: https://github.com/danielanderssonberlin/HopGrid (öffentlich). Lizenz noch offen. Actions-Build für Windows/macOS arm64/x86_64 läuft grün
 - Getestet: Login, Fehllogin, gefälschter Host, Manipulation, Frame-Übertragung (Loopback). Noch nicht getestet: echte Steuerung zwischen zwei Rechnern, Windows-Build
 - Gatekeeper: ohne Apple Developer ID (99 $/Jahr) muss jeder Mac-Nutzer manuell "Trotzdem öffnen". Workflow signiert+notarisiert automatisch, sobald Secrets gesetzt sind (Daniel entscheidet)
+- v0.3.0: Client-Passwort per keyring im System-Schlüsselbund (Backend fest gesetzt, sonst in PyInstaller nicht gefunden), Bild 2560px/Q85/JPEG 4:4:4, DPI-Awareness in hopgrid.py vor Tk (Bugfix), Pfeil-Cursor. Kein Apple-Developer-Konto (Daniel, 15.11.2026) → Gatekeeper bleibt. v0.1.0 gelöscht

@@ -49,7 +49,7 @@ Der Alias funktioniert auch dann, wenn der Router dem Host eine neue IP-Adresse 
 
 Die Suche funktioniert nur im selben Netz. Gast-WLANs und getrennte Netze lassen Broadcasts meist nicht durch. Dann hilft nur die IP-Adresse.
 
-Der Client merkt sich Host, Port und Benutzernamen, aber nicht das Passwort.
+Der Client merkt sich Host, Port und Benutzernamen. Mit dem Haken **Passwort speichern** legt er auch das Passwort ab, und zwar im Schlüsselbund des Systems (macOS: Schlüsselbundverwaltung, Windows: Anmeldeinformationsverwaltung), nicht in einer Datei. Haken entfernen und einmal verbinden löscht es wieder.
 
 ## Einrichtung auf dem Host
 
@@ -84,6 +84,7 @@ Grenzen, die du kennen solltest:
 
 ## Grenzen
 
+- Bildqualität: Standard sind 2560 px Breite, JPEG-Qualität 85 und volle Farbauflösung. Ein Bild hat damit etwa 350 KB. Über langsames WLAN hilft `--max-width 1600 --quality 70`.
 - Es wird ein Monitor übertragen. Welcher, legt `--monitor N` fest.
 - Der Mauszeiger des Hosts ist im Bild nicht zu sehen. Man sieht den eigenen Zeiger über dem Bild.
 - Beide Rechner sollten dasselbe Tastaturlayout haben, sonst kommen Sonderzeichen falsch an.
@@ -101,7 +102,7 @@ python hopgrid.py --mode client --host Büro-PC   # direkt verbinden (Alias oder
 python host.py --cli                             # Host im Terminal
 ```
 
-Optionen für den Host: `--mode host --alias Büro-PC --port 8080 --fps 15 --quality 70 --max-width 1600 --monitor 1`
+Optionen für den Host: `--mode host --alias Büro-PC --port 8080 --fps 15 --quality 85 --max-width 2560 --monitor 1`
 
 ## Selbst bauen
 
@@ -118,6 +119,8 @@ PyInstaller kann nicht für ein anderes System bauen. Die `.exe` entsteht deshal
 | Datei | Inhalt |
 |---|---|
 | `hopgrid.py` | Startfenster: Auswahl Host oder Client |
+| `passwords.py` | Passwort im Schlüsselbund des Systems (keyring) |
+| `dpi.py` | Windows: richtige Skalierung (sonst unscharf, Maus-Versatz) |
 | `autostart.py` | Autostart (Windows-Registry, macOS-LaunchAgent), Einstellungsdateien |
 | `protocol.py` | Login, Schlüsselaustausch, verschlüsselter Kanal |
 | `host.py` | Bildschirmaufnahme (mss und OpenCV als JPEG), Eingaben (pynput, auf macOS Quartz), Host-Fenster |

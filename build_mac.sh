@@ -16,7 +16,7 @@ fi
 
 .venv/bin/pyinstaller --noconfirm --clean --windowed --icon assets/icon.icns \
   --name HopGrid --osx-bundle-identifier com.kenomedia.hopgrid \
-  --hidden-import host --hidden-import client \
+  --hidden-import host --hidden-import client --hidden-import keyring.backends.macOS \
   --hidden-import pynput.keyboard._darwin --hidden-import pynput.mouse._darwin \
   --hidden-import pynput._util.darwin --hidden-import pynput._util.darwin_vks \
   hopgrid.py

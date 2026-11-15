@@ -11,7 +11,7 @@ if not exist .venv (
 .venv\Scripts\python -m pip install -q -r requirements.txt pyinstaller || goto :error
 
 .venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon assets\icon.ico ^
-  --hidden-import host --hidden-import client ^
+  --hidden-import host --hidden-import client --hidden-import keyring.backends.Windows ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^
   --hidden-import pynput._util.win32 --hidden-import pynput._util.win32_vks ^
   --name HopGrid hopgrid.py || goto :error

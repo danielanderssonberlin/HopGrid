@@ -6,7 +6,7 @@ eines verbundenen Clients aus. Kein externer Server, direkte, verschlüsselte TC
 Start:
     python host.py                       # Fenster (Standard)
     python host.py --cli                 # Terminal-Modus, fragt Benutzername/Passwort ab
-    python host.py --port 8080 --fps 15 --quality 70 --max-width 1600 --monitor 1
+    python host.py --port 8080 --fps 15 --quality 85 --max-width 2560 --monitor 1
 """
 
 import argparse
@@ -23,21 +23,7 @@ import tkinter as tk
 from tkinter import scrolledtext
 
 
-def enable_dpi_awareness():
-    """Windows: Prozess DPI-aware machen, damit Bildschirmaufnahme und Mauskoordinaten
-    beide in physischen Pixeln rechnen (sonst Versatz bei 125 %/150 % Skalierung).
-    Muss vor dem Import von mss/pynput passieren."""
-    if sys.platform != "win32":
-        return
-    import ctypes
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-Monitor-DPI-aware
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
+from dpi import enable_dpi_awareness  # noqa: E402
 
 enable_dpi_awareness()
 
@@ -334,6 +320,9 @@ def stream_frames(channel, stop, args):
     """Läuft in eigenem Thread. mss-Instanz muss im selben Thread erzeugt werden."""
     interval = 1.0 / args.fps
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
+    # Volle Farbauflösung (4:4:4) statt 4:2:0: Schrift bleibt scharf, farbige Ränder verschwinden
+    if hasattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444"):
+        encode_params += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
     try:
         with MSS() as sct:
             monitor = sct.monitors[args.monitor]
@@ -882,8 +871,8 @@ def main():
                                          "(Standard: Rechnername)")
     parser.add_argument("--user", help="Benutzername (vorausgefüllt)")
     parser.add_argument("--fps", type=int, default=15, help="Bilder pro Sekunde (1-60)")
-    parser.add_argument("--quality", type=int, default=70, help="JPEG-Qualität (10-95)")
-    parser.add_argument("--max-width", type=int, default=1600,
+    parser.add_argument("--quality", type=int, default=85, help="JPEG-Qualität (10-95)")
+    parser.add_argument("--max-width", type=int, default=2560,
                         help="Bild wird auf diese Breite verkleinert (spart Bandbreite)")
     parser.add_argument("--monitor", type=int, default=1, help="Monitor-Nummer (1 = Hauptmonitor)")
     parser.add_argument("--allow-public", action="store_true",

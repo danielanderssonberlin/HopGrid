@@ -18,6 +18,7 @@ import tkinter as tk
 
 import autostart
 import protocol as proto
+from dpi import enable_dpi_awareness
 
 
 def parse_args():
@@ -36,8 +37,8 @@ def parse_args():
     parser.add_argument("--alias", help="Host: Name im LAN (Standard: Rechnername)")
     parser.add_argument("--bind", default="0.0.0.0", help="Host: Adresse zum Lauschen")
     parser.add_argument("--fps", type=int, default=15, help="Host: Bilder pro Sekunde (1-60)")
-    parser.add_argument("--quality", type=int, default=70, help="Host: JPEG-Qualität (10-95)")
-    parser.add_argument("--max-width", type=int, default=1600, help="Host: maximale Bildbreite")
+    parser.add_argument("--quality", type=int, default=85, help="Host: JPEG-Qualität (10-95)")
+    parser.add_argument("--max-width", type=int, default=2560, help="Host: maximale Bildbreite")
     parser.add_argument("--monitor", type=int, default=1, help="Host: Monitor-Nummer")
     parser.add_argument("--allow-public", action="store_true",
                         help="Host: auch nicht-private IPs erlauben (nicht empfohlen)")
@@ -93,6 +94,7 @@ class StartScreen:
 
 
 def main():
+    enable_dpi_awareness()  # vor dem ersten Fenster, sonst unscharf und Maus-Versatz
     args = parse_args()
     root = tk.Tk()
     if args.mode == "host":

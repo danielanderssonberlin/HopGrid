@@ -24,7 +24,9 @@ from tkinter import messagebox
 from PIL import Image, ImageTk
 
 import autostart
+import passwords
 import protocol as proto
+from dpi import enable_dpi_awareness
 
 MAX_FRAME = 50 * 1024 * 1024
 CONNECT_TIMEOUT = 5
@@ -210,10 +212,20 @@ class ClientApp:
         self.search_btn = tk.Button(self.login, text="Suchen …", command=self.start_search)
         self.search_btn.grid(row=0, column=2, padx=(8, 0))
 
+        # Gespeichertes Passwort aus dem Schlüsselbund vorausfüllen
+        stored = passwords.load(self.entries[0].get(), self.entries[2].get())
+        if stored:
+            self.entries[3].insert(0, stored)
+        self.remember_var = tk.BooleanVar(value=bool(stored))
+        if passwords.available():
+            tk.Checkbutton(self.login, text="Passwort speichern (im Schlüsselbund des Systems)",
+                           variable=self.remember_var).grid(row=4, column=1, columnspan=2,
+                                                            sticky="w")
+
         self.status = tk.Label(self.login, text="", fg="#b00020")
-        self.status.grid(row=4, column=0, columnspan=3, pady=(8, 0))
+        self.status.grid(row=5, column=0, columnspan=3, pady=(8, 0))
         self.connect_btn = tk.Button(self.login, text="Verbinden", command=self.start_connect)
-        self.connect_btn.grid(row=5, column=0, columnspan=3, pady=(10, 0))
+        self.connect_btn.grid(row=6, column=0, columnspan=3, pady=(10, 0))
 
         self.root.bind("<Return>", lambda _e: self.start_connect())
         first_empty = next((e for e in self.entries if not e.get()), self.entries[-1])
@@ -282,14 +294,19 @@ class ClientApp:
         self.status.config(text="Suche Host und verbinde …", fg="#444")
         self._connect_result = None
         threading.Thread(target=self._connect_worker,
-                         args=(host, port, user, password), daemon=True).start()
+                         args=(host, port, user, password, self.remember_var.get()),
+                         daemon=True).start()
         self.root.after(50, lambda: self._check_connect(host))
 
-    def _connect_worker(self, host, port, user, password):
+    def _connect_worker(self, host, port, user, password, remember):
         try:
             ip, real_port = resolve_target(host, port)
             channel = connect_and_authenticate(ip, real_port, user, password)
             save_settings({"host": host, "port": port, "user": user})
+            if remember:
+                passwords.store(host, user, password)
+            else:
+                passwords.forget(host, user)
             self._connect_result = ("ok", channel)
         except AuthError as exc:
             self._connect_result = ("error", str(exc))
@@ -318,7 +335,7 @@ class ClientApp:
         self.root.geometry("1024x640")
 
         self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0,
-                                cursor="crosshair", takefocus=True)
+                                takefocus=True)
         self.canvas.pack(fill="both", expand=True)
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
 
@@ -375,7 +392,7 @@ class ClientApp:
             dw, dh = max(1, int(iw * scale)), max(1, int(ih * scale))
             shown = self.current_frame
             if (dw, dh) != (iw, ih):
-                shown = shown.resize((dw, dh), Image.Resampling.BILINEAR)
+                shown = shown.resize((dw, dh), Image.Resampling.BICUBIC, reducing_gap=2.0)
             self.photo = ImageTk.PhotoImage(shown)
             ox, oy = (cw - dw) // 2, (ch - dh) // 2
             self.canvas.itemconfigure(self.image_item, image=self.photo)
@@ -504,6 +521,7 @@ def main():
     # parse_known_args: macOS kann beim App-Start eigene Argumente (-psn_…) anhängen
     args, _unknown = parser.parse_known_args()
 
+    enable_dpi_awareness()
     root = tk.Tk()
     ClientApp(root, args)
     root.mainloop()
