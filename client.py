@@ -22,10 +22,13 @@ import time
 import tkinter as tk
 from tkinter import messagebox
 
+import customtkinter as ctk
+
 from PIL import Image, ImageTk
 
 import autostart
 import passwords
+import ui
 import protocol as proto
 from dpi import enable_dpi_awareness
 
@@ -171,16 +174,22 @@ def describe_key(event, cmd_as_ctrl):
 # Oberfläche
 # ---------------------------------------------------------------------------
 class ClientApp:
-    def __init__(self, root, args):
+    def __init__(self, root, args, on_back=None):
         self.root = root
         self.args = args
+        self.on_back = on_back
         self.channel = None
         self.running = False          # Empfang aktiv
         self.session_ui = False       # Anzeige-Fenster ist offen
         self.reconnecting = False
         self.conn_params = None       # (host, port, user, password) für Neuverbinden
         self.error = None
-        self.overlay = None
+        self.overlay = None           # Banner "verbinde neu"
+        self.notice_banner = None     # Banner mit Hinweis vom Host
+        self.notice_incoming = None
+        self.cursor_incoming = None   # (x, y, sichtbar) vom Host
+        self.remote_pos = None
+        self.remote_cursor = None     # Canvas-Element des fremden Mauszeigers
         self.last_send = 0.0
         self.cmd_as_ctrl = bool(args.cmd_as_ctrl)
         self.share_clipboard = True
@@ -216,54 +225,117 @@ class ClientApp:
 
     # ----------------------------- Login -----------------------------
     def _build_login(self, message=""):
-        self.login = tk.Frame(self.root, padx=20, pady=20)
+        self.root.configure(fg_color=ui.BG)
+        self.login = ctk.CTkFrame(self.root, fg_color=ui.BG)
         self.login.pack(fill="both", expand=True)
+        ui.header(self.login, "Mit anderem Rechner verbinden",
+                  "Bildschirm eines freigegebenen Rechners im Netz sehen und steuern.",
+                  on_back=self.go_back if self.on_back else None)
+
+        body = ctk.CTkFrame(self.login, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=ui.S4, pady=(ui.S2, ui.S4))
+        box = ui.card(body)
+        box.pack(fill="x")
+        form = ctk.CTkFrame(box, fg_color="transparent")
+        form.pack(fill="x", padx=ui.S3 + 4, pady=ui.S3)
 
         saved = load_settings()
-        fields = [("Host (Alias oder IP)", self.args.host or saved.get("host", "")),
-                  ("Port", str(self.args.port or saved.get("port", proto.DEFAULT_PORT))),
-                  ("Benutzername", self.args.user or saved.get("user", "")),
-                  ("Passwort", "")]
-        self.entries = []
-        for row, (label, value) in enumerate(fields):
-            tk.Label(self.login, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            entry = tk.Entry(self.login, width=28, show="•" if label == "Passwort" else "")
-            entry.insert(0, value)
-            entry.grid(row=row, column=1, pady=4)
-            self.entries.append(entry)
+        # Ziel + Suchen
+        target_row = ctk.CTkFrame(form, fg_color="transparent")
+        target_row.pack(fill="x", pady=(0, ui.S2))
+        target_row.grid_columnconfigure(0, weight=1)
+        self.f_host = ui.Field(target_row, "Rechner (Alias oder IP-Adresse)",
+                               self.args.host or saved.get("host", ""),
+                               placeholder="z. B. Büro-PC oder 192.168.1.20")
+        self.f_host.grid(row=0, column=0, sticky="new")
+        self.search_btn = ui.secondary_button(target_row, "Suchen", self.start_search, width=88)
+        self.search_btn.grid(row=0, column=1, sticky="nw", padx=(ui.S2, 0), pady=(21, 0))
+        self.results = ctk.CTkFrame(form, fg_color="transparent")
 
-        self.search_btn = tk.Button(self.login, text="Suchen …", command=self.start_search)
-        self.search_btn.grid(row=0, column=2, padx=(8, 0))
+        self.f_user = ui.Field(form, "Benutzername", self.args.user or saved.get("user", ""))
+        self.f_user.pack(fill="x", pady=(0, ui.S2))
+        self.f_pw = ui.Field(form, "Passwort", secret=True)
+        self.f_pw.pack(fill="x", pady=(0, ui.S2))
+        self._load_stored_password(self.f_host.get(), self.f_user.get())
 
-        # Gespeichertes Passwort aus dem Schlüsselbund vorausfüllen
-        stored = passwords.load(self.entries[0].get(), self.entries[2].get())
-        if stored:
-            self.entries[3].insert(0, stored)
         self.remember_var = tk.BooleanVar(value=saved.get("remember_password", True))
         if passwords.available():
-            tk.Checkbutton(self.login, text="Passwort speichern (im Schlüsselbund des Systems)",
-                           variable=self.remember_var).grid(row=4, column=1, columnspan=2,
-                                                            sticky="w")
-        self.cmd_var = tk.BooleanVar(value=bool(saved.get("cmd_as_ctrl", self.cmd_as_ctrl)))
-        tk.Checkbutton(self.login, text="Cmd-/Windows-Taste als Strg senden",
-                       variable=self.cmd_var).grid(row=5, column=1, columnspan=2, sticky="w")
+            ui.checkbox(form, "Passwort speichern (im Schlüsselbund des Systems)",
+                        self.remember_var).pack(anchor="w", pady=(ui.S1, ui.S1))
         self.clip_var = tk.BooleanVar(value=bool(saved.get("share_clipboard", True)))
-        tk.Checkbutton(self.login, text="Zwischenablage teilen (Kopieren & Einfügen)",
-                       variable=self.clip_var).grid(row=6, column=1, columnspan=2, sticky="w")
+        ui.checkbox(form, "Zwischenablage teilen (Kopieren & Einfügen)",
+                    self.clip_var).pack(anchor="w", pady=(ui.S1, 0))
 
-        self.status = tk.Label(self.login, text=message, fg="#b00020", wraplength=380)
-        self.status.grid(row=7, column=0, columnspan=3, pady=(8, 0))
-        self.connect_btn = tk.Button(self.login, text="Verbinden", command=self.start_connect)
-        self.connect_btn.grid(row=8, column=0, columnspan=3, pady=(10, 0))
+        advanced = ui.Collapsible(form, "Erweitert").pack(fill="x", pady=(ui.S2, 0))
+        self.advanced = advanced
+        self.f_port = ui.Field(advanced.body, "Port",
+                               str(self.args.port or saved.get("port", proto.DEFAULT_PORT)),
+                               hint="Wird bei der Suche per Alias automatisch ermittelt.",
+                               width=120)
+        self.f_port.pack(anchor="w", pady=(ui.S1, ui.S2))
+        self.cmd_var = tk.BooleanVar(value=bool(saved.get("cmd_as_ctrl", self.cmd_as_ctrl)))
+        ui.checkbox(advanced.body, "Cmd-/Windows-Taste als Strg senden (Mac steuert Windows)",
+                    self.cmd_var).pack(anchor="w")
+
+        self.status = ui.label(form, message, "small", ui.DANGER, anchor="w", justify="left",
+                               wraplength=420)
+        if message:
+            self.status.pack(anchor="w", pady=(ui.S3, 0))
+        self.connect_btn = ui.primary_button(form, "Verbinden", self.start_connect)
+        self.connect_btn.pack(fill="x", pady=(ui.S3, 0))
 
         self.root.bind("<Return>", lambda _e: self.start_connect())
-        first_empty = next((e for e in self.entries if not e.get()), self.entries[-1])
-        first_empty.focus_set()
+        first = next((f for f in (self.f_host, self.f_user, self.f_pw) if not f.get()), self.f_pw)
+        first.entry.focus_set()
+
+    def _load_stored_password(self, host, user):
+        """Gespeichertes Passwort im Hintergrund holen: macOS kann dafür eine
+        Schlüsselbund-Abfrage zeigen, die sonst das Fenster blockiert."""
+        if not host or not user or not passwords.available():
+            return
+        result = []
+
+        def worker():
+            result.append(passwords.load(host, user))
+
+        def check():
+            if not self.login.winfo_exists():
+                return
+            if not result:
+                self.root.after(100, check)
+                return
+            stored = result[0]
+            same_target = self.f_host.get() == host and self.f_user.get() == user
+            if stored and same_target and not self.f_pw.get():
+                self.f_pw.set(stored)
+                self.f_pw.set_hint("✓  Gespeichertes Passwort wird verwendet.")
+                self.f_pw.message.configure(text_color=ui.SUCCESS)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, check)
+
+    def set_status(self, text, kind="error"):
+        color = {"error": ui.DANGER, "info": ui.MUTED}[kind]
+        self.status.configure(text=text, text_color=color)
+        if text:
+            self.status.pack(anchor="w", pady=(ui.S3, 0), before=self.connect_btn)
+        else:
+            self.status.pack_forget()
+
+    def go_back(self):
+        if self.on_back and not self.session_ui:
+            self.on_back()
+
+    def destroy(self):
+        self.session_ui = False
+        self.running = False
+        self._close_channel()
+        for child in self.root.winfo_children():
+            child.destroy()
 
     # ----------------------------- Suche -----------------------------
     def start_search(self):
-        self.search_btn.config(state="disabled")
-        self.status.config(text="Suche Hosts im Netz …", fg="#444")
+        self.search_btn.configure(state="disabled", text="Suche …")
         self._search_result = None
 
         def worker():
@@ -279,49 +351,58 @@ class ClientApp:
         if self._search_result is None:
             self.root.after(100, self._check_search)
             return
-        self.search_btn.config(state="normal")
+        self.search_btn.configure(state="normal", text="Suchen")
+        for child in self.results.winfo_children():
+            child.destroy()
         hosts = self._search_result
+        self.results.pack(fill="x", pady=(0, ui.S2), after=self.f_host.frame.master)
         if not hosts:
-            self.status.config(text="Kein Host gefunden. Ist die Freigabe gestartet?",
-                               fg="#b00020")
+            ui.label(self.results, "Kein freigegebener Rechner gefunden. Läuft auf dem anderen "
+                                   "Rechner die Freigabe?", "small", ui.MUTED, anchor="w",
+                     justify="left", wraplength=420).pack(anchor="w")
             return
-        self.status.config(text=f"{len(hosts)} Host(s) gefunden – bitte auswählen.", fg="#444")
-        menu = tk.Menu(self.root, tearoff=0)
-        for found in hosts:
-            menu.add_command(label=f"{found['alias']}   ({found['ip']}:{found['port']})",
-                             command=lambda h=found: self._pick_host(h))
-        x = self.search_btn.winfo_rootx()
-        y = self.search_btn.winfo_rooty() + self.search_btn.winfo_height()
-        menu.tk_popup(x, y)
+        ui.label(self.results, "Gefunden – zum Übernehmen anklicken:", "small", ui.MUTED
+                 ).pack(anchor="w", pady=(0, ui.S1))
+        for found in hosts[:6]:
+            ctk.CTkButton(self.results, text=f"{found['alias']}     {found['ip']}:{found['port']}",
+                          command=lambda h=found: self._pick_host(h), anchor="w", height=34,
+                          corner_radius=8, fg_color=ui.SECONDARY, hover_color=ui.SECONDARY_HOVER,
+                          text_color=ui.TEXT, font=ui.font("body")).pack(fill="x", pady=2)
 
     def _pick_host(self, found):
-        self.entries[0].delete(0, "end")
-        self.entries[0].insert(0, found["alias"])
-        self.entries[1].delete(0, "end")
-        self.entries[1].insert(0, str(found["port"]))
-        self.status.config(text="")
-        stored = passwords.load(found["alias"], self.entries[2].get())
-        if stored:
-            self.entries[3].delete(0, "end")
-            self.entries[3].insert(0, stored)
-        target = self.entries[2] if not self.entries[2].get() else self.entries[3]
-        target.focus_set()
+        self.f_host.set(found["alias"])
+        self.f_port.set(str(found["port"]))
+        self.results.pack_forget()
+        self.f_pw.set("")
+        self._load_stored_password(found["alias"], self.f_user.get())
+        (self.f_user if not self.f_user.get() else self.f_pw).entry.focus_set()
 
     # ----------------------------- Verbinden -----------------------------
     def start_connect(self):
-        if self.session_ui or str(self.connect_btn["state"]) == "disabled":
+        if self.session_ui or str(self.connect_btn.cget("state")) == "disabled":
             return
-        host = self.entries[0].get().strip()
-        user = self.entries[2].get().strip()
-        password = self.entries[3].get()
+        host = self.f_host.get().strip()
+        user = self.f_user.get().strip()
+        password = self.f_pw.get()
         try:
-            port = int(self.entries[1].get().strip())
+            port = int(self.f_port.get().strip())
+            if not 1 <= port <= 65535:
+                raise ValueError
         except ValueError:
-            self.status.config(text="Port muss eine Zahl sein.", fg="#b00020")
+            if not self.advanced.is_open:
+                self.advanced.toggle()
+            self.f_port.error("Bitte eine Zahl von 1 bis 65535 eingeben.")
             return
-        if not host or not user or not password:
-            self.status.config(text="Bitte alle Felder ausfüllen.", fg="#b00020")
+        if not host:
+            self.f_host.error("Bitte Alias oder IP-Adresse eingeben – oder auf „Suchen“ klicken.")
             return
+        if not user:
+            self.f_user.error("Bitte den Benutzernamen der Freigabe eingeben.")
+            return
+        if not password:
+            self.f_pw.error("Bitte das Passwort der Freigabe eingeben.")
+            return
+        self.set_status("")
 
         remember = self.remember_var.get()
         self.cmd_as_ctrl = self.cmd_var.get()
@@ -331,8 +412,7 @@ class ClientApp:
                        "remember_password": remember, "cmd_as_ctrl": self.cmd_as_ctrl,
                        "share_clipboard": self.share_clipboard})
 
-        self.connect_btn.config(state="disabled")
-        self.status.config(text="Suche Host und verbinde …", fg="#444")
+        self.connect_btn.configure(state="disabled", text="Verbinde …")
         self._connect_result = None
         threading.Thread(target=self._connect_worker,
                          args=(host, port, user, password, remember), daemon=True).start()
@@ -358,9 +438,13 @@ class ClientApp:
             return
         kind, value, params = self._connect_result
         if kind == "error":
-            self.status.config(text=value, fg="#b00020")
-            self.connect_btn.config(state="normal")
-            self.entries[3].focus_set()
+            self.connect_btn.configure(state="normal", text="Verbinden")
+            if "Passwort" in value:
+                self.f_pw.error(value)
+            elif "nicht gefunden" in value:
+                self.f_host.error(value)
+            else:
+                self.set_status(value)
             return
         self.conn_params = params
         self._start_session(params[0], value)
@@ -410,6 +494,17 @@ class ClientApp:
                 if msg_type == proto.MSG_CLIPBOARD:
                     self.clip_incoming = payload.decode("utf-8", errors="replace")
                     continue
+                if msg_type == proto.MSG_CURSOR:
+                    try:
+                        data = json.loads(payload)
+                        self.cursor_incoming = (float(data["x"]), float(data["y"]),
+                                                bool(data["v"]))
+                    except (ValueError, KeyError, TypeError):
+                        pass
+                    continue
+                if msg_type == proto.MSG_NOTICE:
+                    self.notice_incoming = payload.decode("utf-8", errors="replace")
+                    continue
                 if msg_type != proto.MSG_FRAME:
                     continue  # z. B. Lebenszeichen (PING)
                 try:
@@ -452,8 +547,44 @@ class ClientApp:
             self.canvas.coords(self.image_item, ox, oy)
             self.view = (ox, oy, dw, dh)
             self.last_canvas_size = (cw, ch)
+            self._draw_remote_cursor()
+
+        cursor, self.cursor_incoming = self.cursor_incoming, None
+        if cursor is not None:
+            self.remote_pos = cursor
+            self._draw_remote_cursor()
+
+        notice, self.notice_incoming = self.notice_incoming, None
+        if notice is not None:
+            if notice:
+                if self.notice_banner is None:
+                    self.notice_banner = ui.Banner(self.root)
+                self.notice_banner.show(notice, "warn")
+            elif self.notice_banner is not None:
+                self.notice_banner.hide()
+                self.notice_banner = None
 
         self.root.after(RENDER_INTERVAL_MS, self._render_tick)
+
+    # Pfeil-Umriss (Spitze bei 0,0), etwa 18 px hoch
+    CURSOR_SHAPE = [(0, 0), (0, 17), (4.5, 13), (7.5, 19.5), (10, 18.5), (7, 12), (12.5, 12)]
+
+    def _draw_remote_cursor(self):
+        """Mauszeiger des Hosts an seiner Position über das Bild zeichnen."""
+        pos = getattr(self, "remote_pos", None)
+        if pos is None or not self.view:
+            return
+        nx, ny, visible = pos
+        ox, oy, dw, dh = self.view
+        x, y = ox + nx * dw, oy + ny * dh
+        points = [coord for px, py in self.CURSOR_SHAPE for coord in (x + px, y + py)]
+        if self.remote_cursor is None:
+            self.remote_cursor = self.canvas.create_polygon(
+                points, fill="white", outline="black", width=1.2)
+        else:
+            self.canvas.coords(self.remote_cursor, *points)
+        self.canvas.itemconfigure(self.remote_cursor, state="normal" if visible else "hidden")
+        self.canvas.tag_raise(self.remote_cursor)
 
     def _ping_tick(self):
         """Lebenszeichen an den Host, damit er tote Verbindungen erkennt."""
@@ -500,14 +631,12 @@ class ClientApp:
     # ----------------------------- Neuverbinden -----------------------------
     def _show_overlay(self, text):
         if self.overlay is None:
-            self.overlay = tk.Label(self.root, bg="#222", fg="white", padx=18, pady=12,
-                                    font=("TkDefaultFont", 13, "bold"))
-            self.overlay.place(relx=0.5, rely=0.5, anchor="center")
-        self.overlay.config(text=text)
+            self.overlay = ui.Banner(self.root)
+        self.overlay.show(text, "info", rely=0.5, anchor="center", y=0)
 
     def _hide_overlay(self):
         if self.overlay is not None:
-            self.overlay.destroy()
+            self.overlay.hide()
             self.overlay = None
 
     def _begin_reconnect(self):
@@ -569,13 +698,18 @@ class ClientApp:
         self._close_channel()
         self.channel = None
         self._hide_overlay()
+        if self.notice_banner is not None:
+            self.notice_banner.hide()
+            self.notice_banner = None
+        self.remote_cursor = None
+        self.remote_pos = None
         self.canvas.destroy()
         self.current_frame = self.latest_frame = self.photo = self.view = None
         self.last_canvas_size = None
         self.window_sized = False
         self.pressed_keys.clear()
         self.root.title("HopGrid – Verbinden")
-        self.root.geometry("")
+        self.root.geometry("520x640")
         self._build_login(message)
 
     # ----------------------------- Eingaben -----------------------------
@@ -686,7 +820,10 @@ def main():
     args, _unknown = parser.parse_known_args()
 
     enable_dpi_awareness()
-    root = tk.Tk()
+    ui.setup()
+    root = ctk.CTk()
+    root.geometry("520x640")
+    ui.set_window_icon(root)
     ClientApp(root, args)
     root.mainloop()
 

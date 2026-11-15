@@ -6,4 +6,5 @@ Pillow
 cryptography
 keyring
 pyperclip
+customtkinter==5.2.2
 pystray; sys_platform == "win32"

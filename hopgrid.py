@@ -14,10 +14,13 @@ Start:
 """
 
 import argparse
-import tkinter as tk
+import sys
+
+import customtkinter as ctk
 
 import autostart
 import protocol as proto
+import ui
 from dpi import enable_dpi_awareness
 
 
@@ -49,60 +52,86 @@ def parse_args():
     return args
 
 
-def open_host(root, args):
-    import host  # lädt OpenCV/mss/pynput erst, wenn sie gebraucht werden
-    host.HostWindow(root, args, autostart_launch=args.autostart)
+class App:
+    """Hält das Hauptfenster und wechselt zwischen Start, Freigabe und Verbinden."""
 
-
-def open_client(root, args):
-    import client
-    client.ClientApp(root, args)
-
-
-class StartScreen:
     def __init__(self, root, args):
         self.root = root
         self.args = args
+        self.screen = None
         root.title("HopGrid")
-        root.resizable(False, False)
-
-        self.frame = tk.Frame(root, padx=28, pady=24)
-        self.frame.pack()
-        tk.Label(self.frame, text="HopGrid", font=("TkDefaultFont", 20, "bold")).pack()
-        tk.Label(self.frame, text="Fernzugriff im lokalen Netz – verschlüsselt, ohne Cloud",
-                 fg="#555").pack(pady=(2, 18))
-
-        self._choice("Diesen Rechner freigeben",
-                     "Andere dürfen diesen Bildschirm sehen und steuern.", "host")
-        self._choice("Mit anderem Rechner verbinden",
-                     "Einen freigegebenen Rechner sehen und steuern.", "client")
-
-    def _choice(self, title, text, mode):
-        button = tk.Button(self.frame, text=title, width=32, pady=8,
-                           font=("TkDefaultFont", 13, "bold"),
-                           command=lambda: self.select(mode))
-        button.pack(pady=(6, 0))
-        tk.Label(self.frame, text=text, fg="#555").pack(pady=(2, 8))
-
-    def select(self, mode):
-        self.frame.destroy()
-        self.root.resizable(True, True)
-        if mode == "host":
-            open_host(self.root, self.args)
+        root.configure(fg_color=ui.BG)
+        ui.set_window_icon(root)
+        if args.mode == "host":
+            self.open_host(with_back=False)
+        elif args.mode == "client":
+            self.open_client(with_back=False)
         else:
-            open_client(self.root, self.args)
+            self.open_start()
+
+    def _clear(self):
+        if self.screen is not None and hasattr(self.screen, "destroy"):
+            self.screen.destroy()
+        self.screen = None
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.root.unbind("<Return>")
+        self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+        if sys.platform == "darwin":
+            self.root.createcommand("::tk::mac::Quit", self.root.destroy)
+
+    def open_start(self):
+        self._clear()
+        self.root.title("HopGrid")
+        self.root.geometry("520x420")
+        self.root.minsize(460, 400)
+        self.screen = StartScreen(self.root, self.open_host, self.open_client)
+
+    def open_host(self, with_back=True):
+        import host  # lädt OpenCV/mss/pynput erst, wenn sie gebraucht werden
+        self._clear()
+        self.root.geometry("560x720")
+        self.root.minsize(500, 600)
+        self.screen = host.HostWindow(self.root, self.args, autostart_launch=self.args.autostart,
+                                      on_back=self.open_start if with_back else None)
+
+    def open_client(self, with_back=True):
+        import client
+        self._clear()
+        self.root.geometry("520x640")
+        self.root.minsize(460, 560)
+        self.screen = client.ClientApp(self.root, self.args,
+                                       on_back=self.open_start if with_back else None)
+
+
+class StartScreen:
+    def __init__(self, root, on_host, on_client):
+        self.frame = ctk.CTkFrame(root, fg_color=ui.BG)
+        self.frame.pack(fill="both", expand=True)
+        ui.header(self.frame, "HopGrid", "Fernzugriff im lokalen Netz – verschlüsselt, ohne Cloud")
+
+        body = ctk.CTkFrame(self.frame, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=ui.S4, pady=(ui.S2, ui.S4))
+        ui.label(body, "Was möchtest du tun?", "h2").pack(anchor="w", pady=(0, ui.S3))
+        host_card = ui.ChoiceCard(body, "share", "Diesen Rechner freigeben",
+                                  "Jemand anderes darf diesen Bildschirm sehen und steuern.",
+                                  on_host).pack(fill="x", pady=(0, ui.S3))
+        client_card = ui.ChoiceCard(body, "connect", "Mit anderem Rechner verbinden",
+                                    "Einen freigegebenen Rechner im Netz sehen und steuern.",
+                                    on_client).pack(fill="x")
+        host_card.make_focusable()
+        client_card.make_focusable()
+
+    def destroy(self):
+        self.frame.destroy()
 
 
 def main():
     enable_dpi_awareness()  # vor dem ersten Fenster, sonst unscharf und Maus-Versatz
     args = parse_args()
-    root = tk.Tk()
-    if args.mode == "host":
-        open_host(root, args)
-    elif args.mode == "client":
-        open_client(root, args)
-    else:
-        StartScreen(root, args)
+    ui.setup()
+    root = ctk.CTk()
+    App(root, args)
     root.mainloop()
 
 

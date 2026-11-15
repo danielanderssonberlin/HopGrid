@@ -20,7 +20,6 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import scrolledtext
 
 
 from dpi import enable_dpi_awareness  # noqa: E402
@@ -36,6 +35,8 @@ from pynput.mouse import Button  # noqa: E402
 from pynput.mouse import Controller as MouseController  # noqa: E402
 
 import autostart  # noqa: E402
+import customtkinter as ctk  # noqa: E402
+import ui  # noqa: E402
 import protocol as proto  # noqa: E402
 
 if sys.platform == "darwin":
@@ -69,6 +70,23 @@ def log(message):
 def set_log_handler(handler):
     global _log_handler
     _log_handler = handler
+
+
+_status_handler = None
+
+
+def set_status_handler(handler):
+    """handler(event, ip) mit event = 'connected' oder 'disconnected' (für die Oberfläche)."""
+    global _status_handler
+    _status_handler = handler
+
+
+def notify(event, ip):
+    if _status_handler is not None:
+        try:
+            _status_handler(event, ip)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +209,79 @@ class MacMouse:
             self.held.remove(name)
 
 
+class MacKeyboard:
+    """macOS: Tastatur direkt über Quartz.
+
+    pynput fragt beim Tippen das Tastaturlayout über TIS-Funktionen ab. Die dürfen auf
+    neueren macOS-Versionen nur im Hauptthread laufen; im Empfangs-Thread kann das hängen
+    und die Steuerung blockieren. Hier: Zeichen als Unicode senden (layoutunabhängig),
+    bei gedrückter Cmd/Strg/Alt-Taste über den Tastencode (für Kürzel wie Cmd+C)."""
+
+    SPECIAL = {
+        "enter": 36, "tab": 48, "space": 49, "backspace": 51, "esc": 53,
+        "cmd": 55, "cmd_r": 54, "shift": 56, "shift_r": 60, "caps_lock": 57,
+        "alt": 58, "alt_r": 61, "alt_gr": 61, "ctrl": 59, "ctrl_r": 62,
+        "home": 115, "page_up": 116, "delete": 117, "end": 119, "page_down": 121,
+        "left": 123, "right": 124, "down": 125, "up": 126,
+        "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98, "f8": 100,
+        "f9": 101, "f10": 109, "f11": 103, "f12": 111, "f13": 105, "f14": 107, "f15": 113,
+        "f16": 106, "f17": 64, "f18": 79, "f19": 80, "f20": 90,
+    }
+    # US-ANSI-Tastencodes für Kürzel (Cmd+C usw.)
+    ANSI = {
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7, "c": 8, "v": 9,
+        "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16, "t": 17, "1": 18, "2": 19,
+        "3": 20, "4": 21, "6": 22, "5": 23, "=": 24, "9": 25, "7": 26, "-": 27, "8": 28,
+        "0": 29, "]": 30, "o": 31, "u": 32, "[": 33, "i": 34, "p": 35, "l": 37, "j": 38,
+        "'": 39, "k": 40, ";": 41, "\\": 42, ",": 43, "/": 44, "n": 45, "m": 46, ".": 47,
+        "`": 50,
+    }
+    FLAGS = {"shift": 0x20000, "shift_r": 0x20000, "ctrl": 0x40000, "ctrl_r": 0x40000,
+             "alt": 0x80000, "alt_r": 0x80000, "alt_gr": 0x80000,
+             "cmd": 0x100000, "cmd_r": 0x100000}
+
+    def __init__(self):
+        self.held_modifiers = set()
+
+    def _flags(self):
+        flags = 0
+        for name in self.held_modifiers:
+            flags |= self.FLAGS[name]
+        return flags
+
+    def _post(self, keycode, down, text=None):
+        event = Quartz.CGEventCreateKeyboardEvent(None, keycode, down)
+        if text is not None:
+            Quartz.CGEventKeyboardSetUnicodeString(event, len(text), text)
+        Quartz.CGEventSetFlags(event, self._flags())
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+    def key(self, name, down):
+        """Sondertaste. Liefert False, wenn unbekannt."""
+        code = self.SPECIAL.get(name)
+        if code is None:
+            return False
+        if name in self.FLAGS:
+            if down:
+                self.held_modifiers.add(name)
+            else:
+                self.held_modifiers.discard(name)
+        self._post(code, down)
+        return True
+
+    def char(self, ch, down):
+        shortcut = self.held_modifiers - {"shift", "shift_r"}
+        code = self.ANSI.get(ch.lower())
+        if shortcut and code is not None:
+            self._post(code, down)            # Kürzel: echter Tastencode
+        else:
+            self._post(code if code is not None else 0, down, text=ch)  # Text: Unicode
+
+    def release_all(self):
+        for name in list(self.held_modifiers):
+            self.key(name, False)
+
+
 class InputExecutor:
     """Setzt die JSON-Ereignisse des Clients in echte Maus-/Tastatureingaben um.
 
@@ -206,6 +297,7 @@ class InputExecutor:
         self.mouse = MouseController()
         self.keyboard = KeyboardController()
         self.mac_mouse = MacMouse() if sys.platform == "darwin" else None
+        self.mac_keyboard = MacKeyboard() if sys.platform == "darwin" else None
         self.pressed_keys = set()
         self.pressed_buttons = set()
         self._last_click = (None, 0.0, 0, 0, 0)  # Taste, Zeit, x, y, Zähler
@@ -285,6 +377,15 @@ class InputExecutor:
             if dy:
                 self.mouse.scroll(0, dy)
 
+        elif kind == "key" and self.mac_keyboard is not None:
+            down = event.get("a") == "down"
+            if "key" in event:
+                self.mac_keyboard.key(str(event["key"]), down)
+            elif "char" in event:
+                ch = str(event["char"])
+                if len(ch) == 1 and ch.isprintable():
+                    self.mac_keyboard.char(ch, down)
+
         elif kind == "key":
             key = self._resolve_key(event)
             if key is None:
@@ -298,6 +399,11 @@ class InputExecutor:
 
     def release_all(self):
         """Nach Verbindungsende alles loslassen, damit z. B. Strg nicht 'hängt'."""
+        if self.mac_keyboard is not None:
+            try:
+                self.mac_keyboard.release_all()
+            except Exception:
+                pass
         for key in list(self.pressed_keys):
             try:
                 self.keyboard.release(key)
@@ -319,7 +425,7 @@ class InputExecutor:
 # ---------------------------------------------------------------------------
 # Bildschirm aufnehmen und senden
 # ---------------------------------------------------------------------------
-def stream_frames(channel, stop, args):
+def stream_frames(channel, stop, args, state=None):
     """Läuft in eigenem Thread: Bildschirm aufnehmen und senden.
 
     Fehler bei der Aufnahme (Sperrbildschirm, UAC-Abfrage, Monitorwechsel) beenden
@@ -359,11 +465,15 @@ def stream_frames(channel, stop, args):
                 if capture_failed:
                     log("[*] Bildschirmaufnahme läuft wieder")
                     capture_failed = False
+                    if state is not None:
+                        state["capture_failed"] = False
             except Exception as exc:
                 if not capture_failed:
                     log(f"[!] Bildschirm gerade nicht lesbar ({exc}). Verbindung bleibt, "
                         "neuer Versuch läuft.")
                     capture_failed = True
+                    if state is not None:
+                        state["capture_failed"] = True
                 if sct is not None:
                     try:
                         sct.close()
@@ -447,11 +557,103 @@ class ClipboardSync:
             log(f"[!] Zwischenablage konnte nicht gesetzt werden: {exc}")
 
 
+def _process_elevated(pid):
+    """Windows: Läuft der Prozess als Administrator? Zugriff verweigert zählt als ja."""
+    import ctypes
+    from ctypes import wintypes
+    kernel32, advapi32 = ctypes.windll.kernel32, ctypes.windll.advapi32
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(handle, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+            return ctypes.GetLastError() == 5  # ERROR_ACCESS_DENIED
+        try:
+            elevation, size = wintypes.DWORD(), wintypes.DWORD()
+            ok = advapi32.GetTokenInformation(token, 20, ctypes.byref(elevation),  # TokenElevation
+                                              ctypes.sizeof(elevation), ctypes.byref(size))
+            return bool(ok and elevation.value)
+        finally:
+            kernel32.CloseHandle(token)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def control_problem(state):
+    """Warum die Steuerung gerade nicht ankommt – oder '' wenn alles passt."""
+    if sys.platform == "darwin":
+        try:
+            from ApplicationServices import AXIsProcessTrusted
+            if not AXIsProcessTrusted():
+                return ("Steuerung blockiert: Auf dem Host fehlt die Freigabe „Bedienungshilfen“. "
+                        "Dort unter Systemeinstellungen › Datenschutz & Sicherheit › "
+                        "Bedienungshilfen HopGrid entfernen (–) und neu hinzufügen (+).")
+        except ImportError:
+            pass
+    elif sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            if not _process_elevated(os.getpid()):
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                pid = wintypes.DWORD()
+                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if hwnd and pid.value and _process_elevated(pid.value):
+                    return ("Steuerung blockiert: Das aktive Fenster auf dem Host läuft als "
+                            "Administrator. Abhilfe: HopGrid auf dem Host per Rechtsklick › "
+                            "„Als Administrator ausführen“ starten.")
+        except Exception:
+            pass
+    if state.get("capture_failed"):
+        return ("Der Bildschirm des Hosts ist gerade nicht lesbar (Sperrbildschirm oder "
+                "Sicherheitsabfrage). Die Verbindung bleibt bestehen.")
+    return ""
+
+
+def watch_cursor_and_control(channel, stop, monitor, state):
+    """Sendet die Mausposition des Hosts (ca. 30x pro Sekunde, nur bei Änderung)
+    und Hinweise, wenn die Steuerung blockiert ist."""
+    mouse = MouseController()
+    last_pos = None
+    last_notice = None
+    next_check = 0.0
+    try:
+        while not stop.wait(1 / 30):
+            try:
+                x, y = mouse.position
+                nx = (x - monitor["left"]) / max(1, monitor["width"])
+                ny = (y - monitor["top"]) / max(1, monitor["height"])
+                visible = 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0
+                pos = (round(nx, 4), round(ny, 4), visible)
+            except Exception:
+                pos = (0.0, 0.0, False)
+            if pos != last_pos:
+                last_pos = pos
+                channel.send(proto.MSG_CURSOR, json.dumps(
+                    {"x": pos[0], "y": pos[1], "v": pos[2]}).encode("utf-8"))
+            now = time.monotonic()
+            if now >= next_check:
+                next_check = now + 2.0
+                notice = control_problem(state)
+                if notice != last_notice:
+                    last_notice = notice
+                    if notice:
+                        log(f"[!] {notice}")
+                    channel.send(proto.MSG_NOTICE, notice.encode("utf-8"))
+    except (OSError, ConnectionError):
+        pass
+
+
 def run_session(channel, ip, args, monitor):
     stop = threading.Event()
+    state = {"capture_failed": False}
     executor = InputExecutor(monitor)
-    sender = threading.Thread(target=stream_frames, args=(channel, stop, args), daemon=True)
+    sender = threading.Thread(target=stream_frames, args=(channel, stop, args, state),
+                              daemon=True)
     sender.start()
+    threading.Thread(target=watch_cursor_and_control, args=(channel, stop, monitor, state),
+                     daemon=True).start()
     clipboard = ClipboardSync(channel, stop)
     try:
         while not stop.is_set():
@@ -539,7 +741,11 @@ def handle_client(conn, addr, creds, tracker, args, monitor, session_lock):
             conn.settimeout(SESSION_TIMEOUT)
             conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             log(f"[+] {ip} verbunden (verschlüsselt)")
-            run_session(channel, ip, args, monitor)
+            notify("connected", ip)
+            try:
+                run_session(channel, ip, args, monitor)
+            finally:
+                notify("disconnected", ip)
         finally:
             with _active_lock:
                 if _session_conn[0] is conn:
@@ -744,10 +950,7 @@ def run_cli(args):
 # ---------------------------------------------------------------------------
 # Fenster-Modus
 # ---------------------------------------------------------------------------
-def resource_path(relative):
-    """Pfad zu mitgelieferten Dateien, auch in der gebauten App."""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, relative)
+resource_path = ui.resource_path
 
 
 class KeepAwake:
@@ -807,73 +1010,119 @@ class TrayIcon:
 
 
 class HostWindow:
-    """Fenster für die Freigabe. Mit autostart_launch=True startet es sofort mit den
-    gespeicherten Zugangsdaten und läuft im Hintergrund."""
+    """Freigabe-Ansicht. autostart_launch=True: sofort mit gespeicherten Zugangsdaten
+    freigeben und im Hintergrund laufen. on_back: Rückweg zur Startauswahl."""
 
-    def __init__(self, root, args, autostart_launch=False):
+    def __init__(self, root, args, autostart_launch=False, on_back=None):
         self.root = root
         self.args = args
+        self.on_back = on_back
         self.server = None
         self.stop_event = None
         self.discovery = None
         self.creds = None
         self.tray = None
+        self.alive = True
         self.keep_awake = KeepAwake()
         self.log_queue = queue.Queue()
-        self.ui_queue = queue.Queue()   # Befehle aus dem Infobereich-Thread
+        self.ui_queue = queue.Queue()   # Befehle aus anderen Threads (Infobereich, Status)
         set_log_handler(self.log_queue.put)
+        set_status_handler(lambda event, ip: self.ui_queue.put(("status", event, ip)))
 
         saved = autostart.load_json(HOST_CONFIG)
         self.saved_creds = self._stored_creds(saved)
 
         root.title("HopGrid – Freigabe")
-        root.minsize(500, 460)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         if sys.platform == "darwin":
             root.createcommand("::tk::mac::Quit", self.on_close)
             root.createcommand("::tk::mac::ReopenApplication", self.show_window)
 
-        form = tk.Frame(root, padx=16, pady=12)
-        form.pack(fill="x")
-        rows = [("Alias (Name im Netz)", args.alias or saved.get("alias") or default_alias(), ""),
-                ("Benutzername", args.user or saved.get("user", ""), ""),
-                ("Passwort", "", "•"),
-                ("Passwort wiederholen", "", "•"),
-                ("Port", str(args.port or saved.get("port", proto.DEFAULT_PORT)), "")]
-        self.entries = []
-        for row, (label, value, show) in enumerate(rows):
-            tk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 10))
-            entry = tk.Entry(form, width=28, show=show)
-            entry.insert(0, value)
-            entry.grid(row=row, column=1, sticky="we", pady=3)
-            self.entries.append(entry)
-        form.columnconfigure(1, weight=1)
+        self.frame = ctk.CTkFrame(root, fg_color=ui.BG)
+        self.frame.pack(fill="both", expand=True)
+        head = ui.header(self.frame, "Diesen Rechner freigeben",
+                         "Ein anderer Rechner im Netz darf diesen Bildschirm sehen und steuern.",
+                         on_back=self.go_back if on_back else None)
+        self.back_button = getattr(head, "back_button", None)
 
-        self.pw_hint = tk.Label(form, fg="#555", text="")
-        self.pw_hint.grid(row=5, column=1, sticky="w")
+        # Inhalt scrollbar, damit auf kleinen Bildschirmen nichts abgeschnitten wird
+        body = ctk.CTkScrollableFrame(self.frame, fg_color="transparent",
+                                      scrollbar_button_color=ui.BORDER,
+                                      scrollbar_button_hover_color=ui.MUTED)
+        body.pack(fill="both", expand=True, padx=(ui.S4 - 4, ui.S2), pady=(ui.S2, ui.S3))
+
+        # --- Status ---
+        status = ui.card(body)
+        status.pack(fill="x", pady=(0, ui.S3))
+        inner = ctk.CTkFrame(status, fg_color="transparent")
+        inner.pack(fill="x", padx=ui.S3 + 4, pady=ui.S3)
+        self.badge = ui.Badge(inner)
+        self.badge.widget.pack(anchor="w")
+        self.headline = ui.label(inner, "Freigabe ist aus", "h2", anchor="w")
+        self.headline.pack(anchor="w", pady=(ui.S2 + 4, 0))
+        self.subline = ui.label(inner, "Lege Zugangsdaten fest und starte die Freigabe.",
+                                "small", ui.MUTED, anchor="w", justify="left", wraplength=440)
+        self.subline.pack(anchor="w", pady=(2, ui.S3))
+        self.button = ui.primary_button(inner, "Freigabe starten", self.toggle)
+        self.button.pack(fill="x")
+        self.form_error = ui.label(inner, "", "small", ui.DANGER, anchor="w", justify="left",
+                                   wraplength=440)
+        self.badge.set("idle", "Nicht aktiv")
+
+        # --- Zugang ---
+        access = ui.card(body)
+        access.pack(fill="x", pady=(0, ui.S3))
+        form = ctk.CTkFrame(access, fg_color="transparent")
+        form.pack(fill="x", padx=ui.S3 + 4, pady=ui.S3)
+        ui.label(form, "Zugang", "h3").pack(anchor="w", pady=(0, ui.S2))
+        self.f_alias = ui.Field(form, "Name im Netz (Alias)",
+                                args.alias or saved.get("alias") or default_alias(),
+                                hint="Unter diesem Namen findet dich der andere Rechner.")
+        self.f_alias.pack(fill="x", pady=(0, ui.S2))
+        self.f_user = ui.Field(form, "Benutzername", args.user or saved.get("user", ""))
+        self.f_user.pack(fill="x", pady=(0, ui.S2))
+        pw_row = ctk.CTkFrame(form, fg_color="transparent")
+        pw_row.pack(fill="x", pady=(0, ui.S2))
+        pw_row.grid_columnconfigure((0, 1), weight=1, uniform="pw")
+        self.f_pw = ui.Field(pw_row, "Passwort", secret=True)
+        self.f_pw.grid(row=0, column=0, sticky="new", padx=(0, ui.S2))
+        self.f_pw2 = ui.Field(pw_row, "Passwort wiederholen", secret=True)
+        self.f_pw2.grid(row=0, column=1, sticky="new")
+        self.pw_hint = ui.label(form, "", "small", ui.MUTED, anchor="w", justify="left",
+                                wraplength=440)
+        self.pw_hint.pack(anchor="w")
         self._update_pw_hint()
 
         self.remember_var = tk.BooleanVar(value=saved.get("remember", True))
-        tk.Checkbutton(form, text="Einstellungen und Zugangsdaten speichern",
-                       variable=self.remember_var, command=self.on_remember_toggle
-                       ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ui.checkbox(form, "Einstellungen und Zugangsdaten speichern", self.remember_var,
+                    self.on_remember_toggle).pack(anchor="w", pady=(ui.S2, ui.S1))
         self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
         if autostart.supported():
-            tk.Checkbutton(form, text="Bei der Anmeldung automatisch starten und freigeben",
-                           variable=self.autostart_var, command=self.on_autostart_toggle
-                           ).grid(row=7, column=0, columnspan=2, sticky="w")
+            ui.checkbox(form, "Bei der Anmeldung automatisch starten und freigeben",
+                        self.autostart_var, self.on_autostart_toggle).pack(anchor="w",
+                                                                           pady=(ui.S1, 0))
+        advanced = ui.Collapsible(form, "Erweitert").pack(fill="x", pady=(ui.S2, 0))
+        self.advanced = advanced
+        self.f_port = ui.Field(advanced.body, "Port",
+                               str(args.port or saved.get("port", proto.DEFAULT_PORT)),
+                               hint="Standard 8080. Nur ändern, wenn der Port belegt ist.",
+                               width=120)
+        self.f_port.pack(anchor="w", pady=(ui.S1, 0))
+        ui.secondary_button(advanced.body, "Beim Schließen wieder fragen",
+                            self._forget_close_action).pack(anchor="w", pady=(ui.S2, 0))
+        self.fields = [self.f_alias, self.f_user, self.f_pw, self.f_pw2, self.f_port]
 
-        self.button = tk.Button(form, text="Freigabe starten", command=self.toggle)
-        self.button.grid(row=8, column=0, columnspan=2, pady=(10, 2))
-
-        self.status = tk.Label(root, text="Nicht aktiv", font=("TkDefaultFont", 13, "bold"))
-        self.status.pack(pady=(0, 6))
-
-        self.logbox = scrolledtext.ScrolledText(root, height=9, width=60, state="disabled")
-        self.logbox.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        # --- Protokoll ---
+        log_section = ui.Collapsible(body, "Protokoll").pack(fill="both", expand=True)
+        self.logbox = ctk.CTkTextbox(log_section.body, height=130, corner_radius=8,
+                                     border_width=1, border_color=ui.BORDER, fg_color=ui.CARD,
+                                     text_color=ui.TEXT, font=ui.font("mono"), wrap="word")
+        self.logbox.pack(fill="both", expand=True)
+        self.logbox.configure(state="disabled")
+        self.log_section = log_section
 
         root.bind("<Return>", lambda _e: self.toggle() if self.server is None else None)
-        (self.entries[2] if self.entries[1].get() else self.entries[1]).focus_set()
+        (self.f_pw if self.f_user.get() else self.f_user).entry.focus_set()
         root.after(150, self.poll_queues)
 
         if autostart_launch:
@@ -882,8 +1131,8 @@ class HostWindow:
                     int(saved.get("port", proto.DEFAULT_PORT))):
                 self.hide_to_background()
             else:
-                log("[!] Keine gespeicherte Freigabe gefunden. Bitte Passwort eingeben und "
-                    "Freigabe starten.")
+                self.show_error("Keine gespeicherte Freigabe gefunden. Bitte Passwort eingeben "
+                                "und Freigabe starten.")
 
     # ----------------------------- Hilfen -----------------------------
     @staticmethod
@@ -896,12 +1145,24 @@ class HostWindow:
 
     def _update_pw_hint(self):
         text = ""
+        placeholder = ""
         if self.saved_creds is not None:
-            text = "Passwort ist gespeichert – Felder leer lassen, um es weiter zu nutzen."
-        self.pw_hint.config(text=text)
+            text = "✓  Passwort ist gespeichert – Felder leer lassen, um es weiter zu nutzen."
+            placeholder = "Gespeichert"
+        for field in (self.f_pw, self.f_pw2):
+            field.set_placeholder(placeholder)
+        self.pw_hint.configure(text=text, text_color=ui.SUCCESS)
+        if text:
+            self.pw_hint.pack(anchor="w")
+        else:
+            self.pw_hint.pack_forget()
 
-    def set_status(self, text, color="black"):
-        self.status.config(text=text, fg=color)
+    def show_error(self, text):
+        self.form_error.configure(text=text)
+        if text:
+            self.form_error.pack(anchor="w", pady=(ui.S2, 0))
+        else:
+            self.form_error.pack_forget()
 
     def toggle(self):
         if self.server is None:
@@ -909,19 +1170,41 @@ class HostWindow:
         else:
             self.stop()
 
+    def _set_running_ui(self, running, alias="", address=""):
+        for field in self.fields:
+            field.set_state(not running)
+        if self.back_button is not None:
+            self.back_button.configure(state="disabled" if running else "normal")
+        self.button.destroy()
+        parent = self.headline.master
+        if running:
+            self.button = ui.danger_button(parent, "Freigabe stoppen", self.toggle)
+            self.badge.set("active", "Freigabe aktiv – wartet auf Verbindung")
+            self.headline.configure(text=f"„{alias}“")
+            self.subline.configure(text=f"Im Netz erreichbar als „{alias}“ oder unter {address}.")
+        else:
+            self.button = ui.primary_button(parent, "Freigabe starten", self.toggle)
+            self.badge.set("idle", "Nicht aktiv")
+            self.headline.configure(text="Freigabe ist aus")
+            self.subline.configure(text="Lege Zugangsdaten fest und starte die Freigabe.")
+        self.button.pack(fill="x", before=self.form_error if self.form_error.winfo_ismapped()
+                         else None)
+
     # ----------------------------- Speichern -----------------------------
     def _save_config(self):
         """Speichert Alias, Benutzer und Port, mit Haken auch Salt + abgeleiteten
         Schlüssel (nie das Passwort). Ohne Haken werden Zugangsdaten entfernt."""
-        data = {
-            "alias": proto.clean_alias(self.entries[0].get()),
-            "user": self.entries[1].get().strip(),
-            "port": self.args.port or proto.DEFAULT_PORT,
-            "remember": self.remember_var.get(),
-        }
+        try:
+            port = int(self.f_port.get())
+        except ValueError:
+            port = proto.DEFAULT_PORT
+        data = {"alias": proto.clean_alias(self.f_alias.get()), "user": self.f_user.get().strip(),
+                "port": port, "remember": self.remember_var.get()}
+        previous = autostart.load_json(HOST_CONFIG)
+        if previous.get("close_action"):
+            data["close_action"] = previous["close_action"]
         creds = self.creds or self.saved_creds
-        keep_secret = self.remember_var.get() or self.autostart_var.get()
-        if keep_secret and creds is not None:
+        if (self.remember_var.get() or self.autostart_var.get()) and creds is not None:
             data.update(user=creds.username, salt=creds.salt.hex(), key=creds.key.hex())
             self.saved_creds = creds
         else:
@@ -951,45 +1234,46 @@ class HostWindow:
                 self._save_config()
                 log("[*] Autostart aus")
         except OSError as exc:
-            log(f"[!] Autostart konnte nicht geändert werden: {exc}")
+            self.show_error(f"Autostart konnte nicht geändert werden: {exc}")
 
     # ----------------------------- Freigabe -----------------------------
     def start(self):
-        alias = proto.clean_alias(self.entries[0].get())
-        username = self.entries[1].get().strip()
-        password = self.entries[2].get()
-        repeat = self.entries[3].get()
-        if not alias:
-            self.set_status("Bitte einen Alias eingeben.", "#b00020")
-            return
-        if not username:
-            self.set_status("Bitte Benutzernamen eingeben.", "#b00020")
-            return
+        self.show_error("")
+        alias = proto.clean_alias(self.f_alias.get())
+        username = self.f_user.get().strip()
+        password, repeat = self.f_pw.get(), self.f_pw2.get()
         try:
-            port = int(self.entries[4].get().strip())
+            port = int(self.f_port.get().strip())
             if not 1 <= port <= 65535:
                 raise ValueError
         except ValueError:
-            self.set_status("Port muss eine Zahl von 1 bis 65535 sein.", "#b00020")
+            if not self.advanced.is_open:
+                self.advanced.toggle()
+            self.f_port.error("Bitte eine Zahl von 1 bis 65535 eingeben.")
+            return
+        if not alias:
+            self.f_alias.error("Bitte einen Namen eingeben, z. B. „Büro-PC“.")
+            return
+        if not username:
+            self.f_user.error("Bitte einen Benutzernamen festlegen.")
             return
 
         if not password and not repeat and self.saved_creds is not None:
             if username != self.saved_creds.username:
-                self.set_status("Neuer Benutzername: bitte auch ein Passwort eingeben.",
-                                "#b00020")
+                self.f_pw.error("Neuer Benutzername: bitte auch ein Passwort festlegen.")
                 return
             creds = self.saved_creds
         else:
             if len(password) < MIN_PASSWORD_LEN:
-                self.set_status(f"Passwort: mindestens {MIN_PASSWORD_LEN} Zeichen.", "#b00020")
+                self.f_pw.error(f"Mindestens {MIN_PASSWORD_LEN} Zeichen.")
                 return
             if password != repeat:
-                self.set_status("Passwörter stimmen nicht überein.", "#b00020")
+                self.f_pw2.error("Stimmt nicht mit dem Passwort überein.")
                 return
             creds = Credentials(username, password)
         del password, repeat
-        for entry in self.entries[2:4]:
-            entry.delete(0, "end")
+        self.f_pw.set("")
+        self.f_pw2.set("")
         self._begin(creds, alias, port)
 
     def _begin(self, creds, alias, port):
@@ -998,26 +1282,24 @@ class HostWindow:
         try:
             monitor = prepare(self.args)
         except ValueError as exc:
-            self.set_status(str(exc), "#b00020")
+            self.show_error(str(exc))
             return False
         try:
             self.server = open_server(self.args)
         except OSError as exc:
-            self.set_status(f"Port {port} nicht verfügbar: {exc.strerror or exc}", "#b00020")
+            self.show_error(f"Port {port} ist nicht verfügbar ({exc.strerror or exc}). "
+                            "Unter „Erweitert“ einen anderen Port wählen.")
             return False
 
         self.creds = creds
         self.stop_event = threading.Event()
         threading.Thread(target=serve, args=(self.server, creds, self.args, monitor,
                                              self.stop_event), daemon=True).start()
-        for i, value in ((0, alias), (1, creds.username), (4, str(port))):
-            self.entries[i].delete(0, "end")
-            self.entries[i].insert(0, value)
-        for entry in self.entries:
-            entry.config(state="disabled")
-        self.button.config(text="Freigabe stoppen")
+        self.f_alias.set(alias)
+        self.f_user.set(creds.username)
+        self.f_port.set(str(port))
         address = f"{local_ip()}:{port}"
-        self.set_status(f"Aktiv – Alias \"{alias}\" oder {address}", "#1b7f3b")
+        self._set_running_ui(True, alias, address)
         log(f"[*] Freigabe gestartet: {address}, Monitor {self.args.monitor} "
             f"({monitor['width']}x{monitor['height']})")
         self.discovery = start_discovery(self.args)
@@ -1028,8 +1310,13 @@ class HostWindow:
                 autostart.enable()
             except OSError as exc:
                 log(f"[!] Autostart konnte nicht eingerichtet werden: {exc}")
-        for hint in check_macos_permissions():
+        hints = check_macos_permissions()
+        for hint in hints:
             log(f"[!] {hint}")
+        if hints:
+            self.show_error("macOS-Freigaben fehlen – Details im Protokoll.")
+            if not self.log_section.is_open:
+                self.log_section.toggle()
         return True
 
     def stop(self):
@@ -1042,21 +1329,30 @@ class HostWindow:
         self.creds = None
         close_active_connections()
         self.keep_awake.stop()
-        for entry in self.entries:
-            entry.config(state="normal")
-        self.button.config(text="Freigabe starten")
-        self.set_status("Nicht aktiv")
+        self.show_error("")
+        self._set_running_ui(False)
         log("[*] Freigabe gestoppt")
-        self.entries[2].focus_set()
 
-    # ----------------------------- Hintergrund / Beenden -----------------------------
+    # ----------------------------- Navigation / Beenden -----------------------------
+    def go_back(self):
+        if self.server is None and self.on_back:
+            self.on_back()
+
+    def destroy(self):
+        self.alive = False
+        set_log_handler(print)
+        set_status_handler(None)
+        if self.server is not None:
+            self.stop()
+        self.frame.destroy()
+
     def hide_to_background(self):
         """Fenster ausblenden, Freigabe läuft weiter."""
         if sys.platform == "win32":
             try:
                 if self.tray is None:
-                    self.tray = TrayIcon(lambda: self.ui_queue.put("open"),
-                                         lambda: self.ui_queue.put("quit"))
+                    self.tray = TrayIcon(lambda: self.ui_queue.put(("open",)),
+                                         lambda: self.ui_queue.put(("quit",)))
             except Exception as exc:
                 log(f"[!] Symbol im Infobereich nicht möglich ({exc}), Fenster wird minimiert")
                 self.root.iconify()
@@ -1073,11 +1369,32 @@ class HostWindow:
         self.root.focus_force()
 
     def on_close(self):
-        if self.server is None:
+        choice = autostart.load_json(HOST_CONFIG).get("close_action")
+        if choice == "background":
+            self.hide_to_background()
+            return
+        if choice == "quit":
             self.quit_app()
             return
         self.show_window()
-        CloseDialog(self.root, on_background=self.hide_to_background, on_quit=self.quit_app)
+        CloseDialog(self.root, sharing=self.server is not None,
+                    on_background=self.hide_to_background, on_quit=self.quit_app,
+                    on_remember=self._remember_close_action)
+
+    def _forget_close_action(self):
+        data = autostart.load_json(HOST_CONFIG)
+        if data.pop("close_action", None):
+            autostart.save_json(HOST_CONFIG, data, private=True)
+        log("[*] Beim Schließen wird wieder gefragt")
+
+    def _remember_close_action(self, action):
+        data = autostart.load_json(HOST_CONFIG)
+        data["close_action"] = action
+        try:
+            autostart.save_json(HOST_CONFIG, data, private=True)
+            log("[*] Auswahl beim Schließen gemerkt (änderbar unter „Erweitert“)")
+        except OSError:
+            pass
 
     def quit_app(self):
         if self.server is not None:
@@ -1087,16 +1404,24 @@ class HostWindow:
         self.root.destroy()
 
     def poll_queues(self):
+        if not self.alive:
+            return
         while True:
             try:
-                command = self.ui_queue.get_nowait()
+                item = self.ui_queue.get_nowait()
             except queue.Empty:
                 break
-            if command == "open":
+            if item[0] == "open":
                 self.show_window()
-            elif command == "quit":
+            elif item[0] == "quit":
                 self.quit_app()
                 return
+            elif item[0] == "status" and self.server is not None:
+                _, event, ip = item
+                if event == "connected":
+                    self.badge.set("busy", f"Verbunden mit {ip}")
+                else:
+                    self.badge.set("active", "Freigabe aktiv – wartet auf Verbindung")
         lines = []
         while True:
             try:
@@ -1105,47 +1430,76 @@ class HostWindow:
                 break
         if lines:
             stamp = time.strftime("%H:%M:%S")
-            self.logbox.config(state="normal")
+            self.logbox.configure(state="normal")
             for line in lines:
                 self.logbox.insert("end", f"{stamp}  {str(line).strip()}\n")
             self.logbox.see("end")
-            self.logbox.config(state="disabled")
+            self.logbox.configure(state="disabled")
         self.root.after(150, self.poll_queues)
 
 
 class CloseDialog:
     """Frage beim Schließen: im Hintergrund weiterlaufen oder ganz beenden."""
 
-    def __init__(self, root, on_background, on_quit):
-        self.top = top = tk.Toplevel(root)
+    def __init__(self, root, sharing, on_background, on_quit, on_remember):
+        self.on_remember = on_remember
+        self.remember_var = tk.BooleanVar(value=False)
+        self.top = top = ctk.CTkToplevel(root)
         top.title("HopGrid")
-        top.transient(root)
+        top.configure(fg_color=ui.BG)
         top.resizable(False, False)
+        top.transient(root)
         where = {"win32": "Symbol unten rechts im Infobereich",
                  "darwin": "HopGrid bleibt im Dock"}.get(sys.platform, "minimiert")
-        tk.Label(top, text="Die Freigabe ist aktiv.", font=("TkDefaultFont", 13, "bold"),
-                 padx=20).pack(pady=(16, 4))
-        tk.Label(top, text="Soll HopGrid im Hintergrund weiterlaufen oder ganz beendet werden?",
-                 padx=20, wraplength=340).pack()
-        buttons = tk.Frame(top, padx=16, pady=14)
-        buttons.pack()
-        tk.Button(buttons, text=f"Im Hintergrund weiterlaufen\n({where})",
-                  command=lambda: self._choose(on_background)).pack(fill="x", pady=3)
-        tk.Button(buttons, text="Ganz beenden (Freigabe stoppen)",
-                  command=lambda: self._choose(on_quit)).pack(fill="x", pady=3)
-        tk.Button(buttons, text="Abbrechen", command=top.destroy).pack(fill="x", pady=3)
+        box = ctk.CTkFrame(top, fg_color="transparent")
+        box.pack(padx=ui.S4, pady=ui.S4)
+        if sharing:
+            title = "Die Freigabe läuft noch"
+            text = "Soll HopGrid im Hintergrund weiterlaufen? Dann bleibt dieser Rechner erreichbar."
+            quit_text = "Freigabe stoppen und beenden"
+        else:
+            title = "HopGrid schließen?"
+            text = "Im Hintergrund bleibt HopGrid griffbereit und startet schneller."
+            quit_text = "Ganz beenden"
+        ui.label(box, title, "h2").pack(anchor="w")
+        ui.label(box, text, "body", ui.MUTED, justify="left", wraplength=360
+                 ).pack(anchor="w", pady=(ui.S1, ui.S3))
+        ui.primary_button(box, "Im Hintergrund weiterlaufen",
+                          lambda: self._choose("background", on_background)).pack(fill="x")
+        ui.label(box, where, "small", ui.MUTED).pack(anchor="w", pady=(2, ui.S2))
+        ui.danger_button(box, quit_text,
+                         lambda: self._choose("quit", on_quit)).pack(fill="x", pady=(0, ui.S2))
+        ui.secondary_button(box, "Abbrechen", top.destroy).pack(fill="x")
+        ui.checkbox(box, "Auswahl merken und nicht mehr fragen", self.remember_var
+                    ).pack(anchor="w", pady=(ui.S3, 0))
         top.protocol("WM_DELETE_WINDOW", top.destroy)
-        top.grab_set()
-        top.focus_force()
+        top.bind("<Escape>", lambda _e: top.destroy())
+        top.after(50, self._focus)
 
-    def _choose(self, action):
-        self.top.grab_release()
+    def _focus(self):
+        try:
+            self.top.grab_set()
+            self.top.focus_force()
+        except tk.TclError:
+            pass
+
+    def _choose(self, name, action):
+        if self.remember_var.get():
+            self.on_remember(name)
+        try:
+            self.top.grab_release()
+        except tk.TclError:
+            pass
         self.top.destroy()
         action()
 
 
 def run_gui(args):
-    root = tk.Tk()
+    ui.setup()
+    root = ctk.CTk()
+    root.configure(fg_color=ui.BG)
+    root.geometry("560x720")
+    ui.set_window_icon(root)
     HostWindow(root, args, autostart_launch=getattr(args, "autostart", False))
     root.mainloop()
 

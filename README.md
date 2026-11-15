@@ -30,11 +30,13 @@ Die Programme sind noch nicht von Apple oder Microsoft signiert. Beim ersten Sta
 2. Auf dem anderen Rechner HopGrid starten und **Mit anderem Rechner verbinden** wählen. Im Feld *Host* den Alias oder die IP-Adresse eingeben, dazu Benutzername und Passwort, dann *Verbinden* klicken. *Suchen …* listet alle laufenden Hosts im Netz auf.
 3. Das Fenster zeigt den Bildschirm des Hosts. Maus, Scrollrad und Tastatur wirken auf dem Host.
 
-Mit *Freigabe stoppen* endet die Verbindung sofort. Schließt du das Fenster, während die Freigabe läuft, fragt HopGrid: **im Hintergrund weiterlaufen** (Windows: Symbol unten rechts im Infobereich, macOS: im Dock) oder **ganz beenden**.
+Mit *Freigabe stoppen* endet die Verbindung sofort. Schließt du das Freigabe-Fenster, fragt HopGrid: **im Hintergrund weiterlaufen** (Windows: Symbol unten rechts im Infobereich, macOS: im Dock) oder **ganz beenden**. Mit *Auswahl merken* fragt HopGrid nicht mehr. Unter *Erweitert* > *Beim Schließen wieder fragen* lässt sich das zurücksetzen.
+
+Im Verbindungsfenster siehst du den Mauszeiger des anderen Rechners als weißen Pfeil. Kommt die Steuerung auf dem Host nicht an, zeigt ein gelbes Banner den Grund und die Abhilfe, zum Beispiel fehlende Bedienungshilfen auf dem Mac oder ein Admin-Fenster unter Windows.
 
 ### Einstellungen speichern
 
-- **Freigabe:** Alias, Benutzername und Port werden gespeichert. Mit dem Haken *Einstellungen und Zugangsdaten speichern* merkt sich HopGrid auch das Passwort, und zwar nur als abgeleiteten Schlüssel, nicht im Klartext. Beim nächsten Mal lässt du die Passwortfelder einfach leer.
+- **Freigabe:** Alias, Benutzername und Port werden gespeichert. Mit dem Haken *Einstellungen und Zugangsdaten speichern* merkt sich HopGrid auch das Passwort, und zwar nur als abgeleiteten Schlüssel, nicht im Klartext. Die Passwortfelder zeigen dann „Gespeichert“. Lass sie einfach leer.
 - **Verbinden:** Host, Port, Benutzername und Optionen werden gespeichert. *Passwort speichern* legt das Passwort im Schlüsselbund des Systems ab (siehe unten).
 
 ### Kopieren und Einfügen
@@ -103,7 +105,6 @@ Grenzen, die du kennen solltest:
 
 - Bildqualität: Standard sind 2560 px Breite, JPEG-Qualität 85 und volle Farbauflösung. Ein Bild hat damit etwa 350 KB. Über langsames WLAN hilft `--max-width 1600 --quality 70`.
 - Es wird ein Monitor übertragen. Welcher, legt `--monitor N` fest.
-- Der Mauszeiger des Hosts ist im Bild nicht zu sehen. Man sieht den eigenen Zeiger über dem Bild.
 - Beide Rechner sollten dasselbe Tastaturlayout haben, sonst kommen Sonderzeichen falsch an.
 - Tastenkürzel des Systems wie Cmd+Tab oder die Windows-Taste bleiben auf dem eigenen Rechner.
 - Wenn ein Mac einen Windows-Rechner steuert, den Client mit `--cmd-as-ctrl` starten. Dann wird Cmd+C zu Strg+C.
@@ -138,6 +139,7 @@ PyInstaller kann nicht für ein anderes System bauen. Die `.exe` entsteht deshal
 | `hopgrid.py` | Startfenster: Auswahl Host oder Client |
 | `passwords.py` | Passwort im Schlüsselbund des Systems (keyring) |
 | `dpi.py` | Windows: richtige Skalierung (sonst unscharf, Maus-Versatz) |
+| `ui.py` | Design: Farben (hell/dunkel), Schriften, Bausteine (customtkinter) |
 | `autostart.py` | Autostart (Windows-Registry, macOS-LaunchAgent), Einstellungsdateien |
 | `protocol.py` | Login, Schlüsselaustausch, verschlüsselter Kanal |
 | `host.py` | Bildschirmaufnahme (mss und OpenCV als JPEG), Eingaben (pynput, auf macOS Quartz), Host-Fenster |

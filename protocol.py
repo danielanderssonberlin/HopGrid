@@ -59,6 +59,8 @@ MSG_INPUT = 11   # Client -> Host: JSON-Eingabeereignis
 MSG_PING = 12    # beide Richtungen: Lebenszeichen ohne Inhalt
 MSG_CLIPBOARD = 13  # beide Richtungen: Text der Zwischenablage (UTF-8)
 MAX_CLIPBOARD = 1024 * 1024
+MSG_NOTICE = 14  # Host -> Client: Hinweistext (leer = Hinweis weg), z. B. Steuerung blockiert
+MSG_CURSOR = 15  # Host -> Client: JSON {x, y, v} – Mausposition auf dem Host (normiert)
 
 SECURE_HEADER = struct.Struct("!I")
 GCM_TAG_SIZE = 16
