@@ -30,7 +30,24 @@ Die Programme sind noch nicht von Apple oder Microsoft signiert. Beim ersten Sta
 2. Auf dem anderen Rechner HopGrid starten und **Mit anderem Rechner verbinden** wählen. Im Feld *Host* den Alias oder die IP-Adresse eingeben, dazu Benutzername und Passwort, dann *Verbinden* klicken. *Suchen …* listet alle laufenden Hosts im Netz auf.
 3. Das Fenster zeigt den Bildschirm des Hosts. Maus, Scrollrad und Tastatur wirken auf dem Host.
 
-Mit *Freigabe stoppen* oder durch Schließen des Host-Fensters endet die Verbindung sofort.
+Mit *Freigabe stoppen* endet die Verbindung sofort. Schließt du das Fenster, während die Freigabe läuft, fragt HopGrid: **im Hintergrund weiterlaufen** (Windows: Symbol unten rechts im Infobereich, macOS: im Dock) oder **ganz beenden**.
+
+### Einstellungen speichern
+
+- **Freigabe:** Alias, Benutzername und Port werden gespeichert. Mit dem Haken *Einstellungen und Zugangsdaten speichern* merkt sich HopGrid auch das Passwort, und zwar nur als abgeleiteten Schlüssel, nicht im Klartext. Beim nächsten Mal lässt du die Passwortfelder einfach leer.
+- **Verbinden:** Host, Port, Benutzername und Optionen werden gespeichert. *Passwort speichern* legt das Passwort im Schlüsselbund des Systems ab (siehe unten).
+
+### Kopieren und Einfügen
+
+Die Zwischenablage wird in beide Richtungen abgeglichen, bei Text bis 1 MB. Kopierst du auf deinem Rechner etwas, kannst du es im HopGrid-Fenster mit Strg+V bzw. Cmd+V einfügen, und umgekehrt. Ausschalten kannst du das mit dem Haken *Zwischenablage teilen*. Bilder und Dateien werden nicht übertragen.
+
+### Stabile Verbindung
+
+- Reißt die Verbindung ab, zum Beispiel weil das WLAN kurz weg ist, verbindet der Client bis zu 2 Minuten lang automatisch neu.
+- Sperrbildschirm oder Windows-UAC-Abfragen trennen die Verbindung nicht mehr. Das Bild kommt zurück, sobald der Bildschirm wieder lesbar ist.
+- Solange die Freigabe läuft, geht der Host nicht in den Ruhezustand. Auf dem Mac wird die App im Hintergrund außerdem nicht gedrosselt (App Nap).
+- Cmd+Q und das Schließen des Fensters beenden eine laufende Verbindung erst nach einer Rückfrage.
+- Host und Client müssen dieselbe HopGrid-Version haben. Sonst gibt es eine klare Meldung.
 
 ### Autostart
 

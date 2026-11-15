@@ -32,7 +32,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-PROTOCOL_ID = b"HopGrid-v2"
+PROTOCOL_ID = b"HopGrid-v3"
+PROTOCOL_VERSION = 3
 DEFAULT_PORT = 8080
 
 # Suche im LAN per UDP-Broadcast: Client ruft, jeder Host antwortet mit Alias und Port.
@@ -55,6 +56,9 @@ MAX_PLAIN_MSG = 4096
 # Verschlüsselte Nachrichten (nach dem Login)
 MSG_FRAME = 10   # Host -> Client: JPEG-Bild
 MSG_INPUT = 11   # Client -> Host: JSON-Eingabeereignis
+MSG_PING = 12    # beide Richtungen: Lebenszeichen ohne Inhalt
+MSG_CLIPBOARD = 13  # beide Richtungen: Text der Zwischenablage (UTF-8)
+MAX_CLIPBOARD = 1024 * 1024
 
 SECURE_HEADER = struct.Struct("!I")
 GCM_TAG_SIZE = 16
@@ -215,7 +219,7 @@ def clean_alias(alias):
 
 
 def discovery_reply(alias, port):
-    return json.dumps({"hopgrid": 2, "alias": alias, "port": port}).encode("utf-8")
+    return json.dumps({"hopgrid": PROTOCOL_VERSION, "alias": alias, "port": port}).encode("utf-8")
 
 
 def discover(timeout=1.5):
@@ -257,7 +261,7 @@ def discover(timeout=1.5):
                 port = int(info["port"])
             except (ValueError, KeyError, TypeError):
                 continue
-            if info.get("hopgrid") != 2 or not alias or not 1 <= port <= 65535:
+            if info.get("hopgrid") != PROTOCOL_VERSION or not alias or not 1 <= port <= 65535:
                 continue
             found[(addr[0], port)] = {"alias": alias, "ip": addr[0], "port": port}
     return sorted(found.values(), key=lambda h: (h["alias"].casefold(), h["ip"]))

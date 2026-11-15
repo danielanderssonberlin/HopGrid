@@ -44,12 +44,14 @@ if sys.platform == "darwin":
 # mss >= 10 heißt die Klasse MSS, ältere Versionen nutzen mss.mss
 MSS = getattr(mss, "MSS", None) or mss.mss
 
-MAX_INPUT_MSG = 64 * 1024    # Eingaben sind klein; schützt vor Speichermissbrauch
+MAX_INPUT_MSG = 2 * 1024 * 1024  # Eingaben + Zwischenablage; schützt vor Speichermissbrauch
 AUTH_TIMEOUT = 15            # Sekunden für den kompletten Login
 FAIL_DELAY = 2.0             # Verzögerung nach falschem Login (bremst Raten)
 MAX_FAILS = 5                # Fehlversuche pro IP bis zur Sperre
 BLOCK_SECONDS = 300          # Dauer der IP-Sperre
-KEEPALIVE_SECONDS = 2.0      # spätestens so oft ein Bild senden, auch ohne Änderung
+KEEPALIVE_SECONDS = 2.0      # spätestens so oft ein Bild oder Lebenszeichen senden
+SESSION_TIMEOUT = 20         # ohne Lebenszeichen vom Client gilt die Verbindung als tot
+TAKEOVER_WAIT = 5            # so lange auf das Ende einer alten Sitzung warten
 MIN_PASSWORD_LEN = 8
 HOST_CONFIG = "host.json"   # gespeicherte Freigabe für den Autostart
 
@@ -126,6 +128,7 @@ class FailTracker:
 # Offene Client-Verbindungen, damit "Freigabe stoppen" sie sofort trennen kann
 _active_conns = set()
 _active_lock = threading.Lock()
+_session_conn = [None]  # Verbindung der laufenden Sitzung (für Übernahme bei neuem Login)
 
 
 def close_active_connections():
@@ -317,43 +320,76 @@ class InputExecutor:
 # Bildschirm aufnehmen und senden
 # ---------------------------------------------------------------------------
 def stream_frames(channel, stop, args):
-    """Läuft in eigenem Thread. mss-Instanz muss im selben Thread erzeugt werden."""
+    """Läuft in eigenem Thread: Bildschirm aufnehmen und senden.
+
+    Fehler bei der Aufnahme (Sperrbildschirm, UAC-Abfrage, Monitorwechsel) beenden
+    die Verbindung NICHT: Es wird neu versucht und solange ein Lebenszeichen gesendet.
+    Nur ein Fehler beim Senden (Verbindung weg) beendet die Sitzung."""
     interval = 1.0 / args.fps
     encode_params = [cv2.IMWRITE_JPEG_QUALITY, args.quality]
     # Volle Farbauflösung (4:4:4) statt 4:2:0: Schrift bleibt scharf, farbige Ränder verschwinden
     if hasattr(cv2, "IMWRITE_JPEG_SAMPLING_FACTOR_444"):
         encode_params += [cv2.IMWRITE_JPEG_SAMPLING_FACTOR, cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444]
+
+    sct = None
+    monitor = None
+    last_img = None
+    last_sent = 0.0
+    capture_failed = False
     try:
-        with MSS() as sct:
-            monitor = sct.monitors[args.monitor]
-            last_img = None
-            last_sent = 0.0
-            while not stop.is_set():
-                started = time.monotonic()
-
-                shot = sct.grab(monitor)                       # BGRA, physische Pixel
-                img = cv2.cvtColor(np.asarray(shot), cv2.COLOR_BGRA2BGR)
-
+        while not stop.is_set():
+            started = time.monotonic()
+            jpeg = None
+            try:
+                if sct is None:  # mss-Instanz muss im selben Thread entstehen
+                    sct = MSS()
+                    index = args.monitor if args.monitor < len(sct.monitors) else 1
+                    monitor = sct.monitors[index]
+                img = cv2.cvtColor(np.asarray(sct.grab(monitor)), cv2.COLOR_BGRA2BGR)
                 h, w = img.shape[:2]
                 if w > args.max_width:                         # Bandbreite sparen
-                    new_h = int(h * args.max_width / w)
-                    img = cv2.resize(img, (args.max_width, new_h), interpolation=cv2.INTER_AREA)
-
+                    img = cv2.resize(img, (args.max_width, int(h * args.max_width / w)),
+                                     interpolation=cv2.INTER_AREA)
                 changed = last_img is None or not np.array_equal(img, last_img)
                 if changed or started - last_sent >= KEEPALIVE_SECONDS:
-                    ok, jpeg = cv2.imencode(".jpg", img, encode_params)
+                    ok, encoded = cv2.imencode(".jpg", img, encode_params)
                     if ok:
-                        channel.send(proto.MSG_FRAME, jpeg.tobytes())
+                        jpeg = encoded.tobytes()
                         last_img = img
-                        last_sent = started
+                if capture_failed:
+                    log("[*] Bildschirmaufnahme läuft wieder")
+                    capture_failed = False
+            except Exception as exc:
+                if not capture_failed:
+                    log(f"[!] Bildschirm gerade nicht lesbar ({exc}). Verbindung bleibt, "
+                        "neuer Versuch läuft.")
+                    capture_failed = True
+                if sct is not None:
+                    try:
+                        sct.close()
+                    except Exception:
+                        pass
+                    sct = None
+                last_img = None
 
-                stop.wait(max(0.0, interval - (time.monotonic() - started)))
+            if jpeg is not None:
+                channel.send(proto.MSG_FRAME, jpeg)
+                last_sent = started
+            elif started - last_sent >= KEEPALIVE_SECONDS:
+                channel.send(proto.MSG_PING, b"")
+                last_sent = started
+
+            pause = 1.0 if capture_failed else interval - (time.monotonic() - started)
+            stop.wait(max(0.0, pause))
     except (OSError, ConnectionError) as exc:
         if not stop.is_set():
             log(f"[-] Senden abgebrochen: {exc}")
-    except Exception as exc:  # z. B. fehlende Bildschirmfreigabe
-        log(f"[!] Fehler bei der Bildschirmaufnahme: {exc}")
     finally:
+        if sct is not None:
+            try:
+                sct.close()
+            except Exception:
+                pass
         stop.set()
         try:
             channel.sock.shutdown(socket.SHUT_RDWR)  # weckt den Empfangs-Thread auf
@@ -364,14 +400,65 @@ def stream_frames(channel, stop, args):
 # ---------------------------------------------------------------------------
 # Verbindung eines Clients
 # ---------------------------------------------------------------------------
+class ClipboardSync:
+    """Gleicht die Text-Zwischenablage des Hosts mit dem Client ab.
+    Ein eigener Thread meldet Änderungen am Host, set_from_client übernimmt Text vom Client."""
+
+    def __init__(self, channel, stop):
+        self.channel = channel
+        self.stop = stop
+        self._lock = threading.Lock()
+        try:
+            import pyperclip
+            self._clip = pyperclip
+            self._last = pyperclip.paste()
+        except Exception as exc:
+            log(f"[!] Zwischenablage nicht verfügbar: {exc}")
+            self._clip = None
+            return
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def _watch(self):
+        while not self.stop.wait(0.5):
+            try:
+                text = self._clip.paste()
+            except Exception:
+                continue
+            with self._lock:
+                if not text or text == self._last:
+                    continue
+                self._last = text
+            data = text.encode("utf-8")
+            if len(data) <= proto.MAX_CLIPBOARD:
+                try:
+                    self.channel.send(proto.MSG_CLIPBOARD, data)
+                except OSError:
+                    return
+
+    def set_from_client(self, payload):
+        if self._clip is None or len(payload) > proto.MAX_CLIPBOARD:
+            return
+        text = payload.decode("utf-8", errors="replace")
+        with self._lock:
+            self._last = text
+        try:
+            self._clip.copy(text)
+        except Exception as exc:
+            log(f"[!] Zwischenablage konnte nicht gesetzt werden: {exc}")
+
+
 def run_session(channel, ip, args, monitor):
     stop = threading.Event()
     executor = InputExecutor(monitor)
     sender = threading.Thread(target=stream_frames, args=(channel, stop, args), daemon=True)
     sender.start()
+    clipboard = ClipboardSync(channel, stop)
     try:
         while not stop.is_set():
             msg_type, payload = channel.recv()
+            if msg_type == proto.MSG_CLIPBOARD:
+                clipboard.set_from_client(payload)
+                continue
             if msg_type != proto.MSG_INPUT:
                 continue
             try:
@@ -382,8 +469,8 @@ def run_session(channel, ip, args, monitor):
                 continue
             try:
                 executor.handle(event)
-            except (KeyError, TypeError, ValueError) as exc:
-                log(f"[!] Ungültiges Ereignis von {ip} ignoriert: {exc}")
+            except Exception as exc:  # ein fehlerhaftes Ereignis darf die Sitzung nicht beenden
+                log(f"[!] Eingabe von {ip} nicht ausführbar ({exc}), ignoriert")
     finally:
         stop.set()
         executor.release_all()
@@ -401,6 +488,7 @@ def handle_client(conn, addr, creds, tracker, args, monitor, session_lock):
         nonce = os.urandom(32)
         kx = proto.KeyExchange()
         proto.send_plain(conn, proto.MSG_CHALLENGE, {
+            "v": proto.PROTOCOL_VERSION,
             "salt": creds.salt.hex(),
             "iterations": proto.PBKDF2_ITERATIONS,
             "nonce": nonce.hex(),
@@ -423,10 +511,23 @@ def handle_client(conn, addr, creds, tracker, args, monitor, session_lock):
             return
 
         tracker.reset(ip)
+        # Neuer erfolgreicher Login übernimmt: alte (evtl. tote) Verbindung trennen.
+        # Wichtig für das automatische Neuverbinden nach einem Netzaussetzer.
         if not session_lock.acquire(blocking=False):
-            proto.send_plain(conn, proto.MSG_AUTH_RESULT,
-                             {"ok": False, "reason": "Es ist bereits ein Client verbunden."})
-            return
+            log(f"[*] Neuer Login von {ip} – bisherige Verbindung wird getrennt")
+            with _active_lock:
+                current = _session_conn[0]
+            if current is not None:
+                try:
+                    current.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            if not session_lock.acquire(timeout=TAKEOVER_WAIT):
+                proto.send_plain(conn, proto.MSG_AUTH_RESULT,
+                                 {"ok": False, "reason": "Der Host ist gerade belegt."})
+                return
+        with _active_lock:
+            _session_conn[0] = conn
         try:
             # 3. Gegenbeweis senden, ab jetzt verschlüsselt
             host_to_client, client_to_host = kx.session_keys(client_pub, creds.key, transcript)
@@ -435,10 +536,14 @@ def handle_client(conn, addr, creds, tracker, args, monitor, session_lock):
                 "proof": proto.make_proof(creds.key, b"host", transcript).hex(),
             })
             channel = proto.SecureChannel(conn, host_to_client, client_to_host, MAX_INPUT_MSG)
-            conn.settimeout(None)
+            conn.settimeout(SESSION_TIMEOUT)
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             log(f"[+] {ip} verbunden (verschlüsselt)")
             run_session(channel, ip, args, monitor)
         finally:
+            with _active_lock:
+                if _session_conn[0] is conn:
+                    _session_conn[0] = None
             session_lock.release()
     except proto.ProtocolError as exc:
         log(f"[!] {ip}: {exc}")
@@ -639,9 +744,71 @@ def run_cli(args):
 # ---------------------------------------------------------------------------
 # Fenster-Modus
 # ---------------------------------------------------------------------------
+def resource_path(relative):
+    """Pfad zu mitgelieferten Dateien, auch in der gebauten App."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
+
+class KeepAwake:
+    """Verhindert während der Freigabe den Ruhezustand des Rechners und
+    (macOS) App Nap, das die App im Hintergrund drosseln würde."""
+
+    def __init__(self):
+        self._token = None
+
+    def start(self):
+        if sys.platform == "darwin":
+            try:
+                from Foundation import NSProcessInfo
+                # NSActivityUserInitiated (inkl. kein Ruhezustand) | NSActivityLatencyCritical
+                options = 0x00FFFFFF | 0xFF00000000
+                self._token = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                    options, "HopGrid-Freigabe aktiv")
+            except Exception as exc:
+                log(f"[!] Ruhezustand kann nicht verhindert werden: {exc}")
+        elif sys.platform == "win32":
+            import ctypes
+            ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+
+    def stop(self):
+        if sys.platform == "darwin" and self._token is not None:
+            try:
+                from Foundation import NSProcessInfo
+                NSProcessInfo.processInfo().endActivity_(self._token)
+            except Exception:
+                pass
+            self._token = None
+        elif sys.platform == "win32":
+            import ctypes
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+
+
+class TrayIcon:
+    """Windows: Symbol im Infobereich (unten rechts) mit Öffnen/Beenden."""
+
+    def __init__(self, on_open, on_quit):
+        import pystray
+        from PIL import Image
+        image = Image.open(resource_path(os.path.join("assets", "icon.png")))
+        menu = pystray.Menu(
+            pystray.MenuItem("Öffnen", lambda: on_open(), default=True),
+            pystray.MenuItem("Beenden", lambda: on_quit()),
+        )
+        self._icon = pystray.Icon("HopGrid", image, "HopGrid – Freigabe aktiv", menu)
+        threading.Thread(target=self._icon.run, daemon=True).start()
+
+    def stop(self):
+        try:
+            self._icon.stop()
+        except Exception:
+            pass
+
+
 class HostWindow:
-    """Fenster für die Freigabe. Mit autostart=True startet es sofort mit den
-    gespeicherten Zugangsdaten (Autostart bei der Anmeldung)."""
+    """Fenster für die Freigabe. Mit autostart_launch=True startet es sofort mit den
+    gespeicherten Zugangsdaten und läuft im Hintergrund."""
 
     def __init__(self, root, args, autostart_launch=False):
         self.root = root
@@ -650,13 +817,21 @@ class HostWindow:
         self.stop_event = None
         self.discovery = None
         self.creds = None
+        self.tray = None
+        self.keep_awake = KeepAwake()
         self.log_queue = queue.Queue()
+        self.ui_queue = queue.Queue()   # Befehle aus dem Infobereich-Thread
         set_log_handler(self.log_queue.put)
 
         saved = autostart.load_json(HOST_CONFIG)
+        self.saved_creds = self._stored_creds(saved)
+
         root.title("HopGrid – Freigabe")
-        root.minsize(480, 420)
+        root.minsize(500, 460)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        if sys.platform == "darwin":
+            root.createcommand("::tk::mac::Quit", self.on_close)
+            root.createcommand("::tk::mac::ReopenApplication", self.show_window)
 
         form = tk.Frame(root, padx=16, pady=12)
         form.pack(fill="x")
@@ -674,15 +849,22 @@ class HostWindow:
             self.entries.append(entry)
         form.columnconfigure(1, weight=1)
 
+        self.pw_hint = tk.Label(form, fg="#555", text="")
+        self.pw_hint.grid(row=5, column=1, sticky="w")
+        self._update_pw_hint()
+
+        self.remember_var = tk.BooleanVar(value=saved.get("remember", True))
+        tk.Checkbutton(form, text="Einstellungen und Zugangsdaten speichern",
+                       variable=self.remember_var, command=self.on_remember_toggle
+                       ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
-        self.autostart_box = tk.Checkbutton(
-            form, text="Bei der Anmeldung automatisch starten und freigeben",
-            variable=self.autostart_var, command=self.on_autostart_toggle)
         if autostart.supported():
-            self.autostart_box.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            tk.Checkbutton(form, text="Bei der Anmeldung automatisch starten und freigeben",
+                           variable=self.autostart_var, command=self.on_autostart_toggle
+                           ).grid(row=7, column=0, columnspan=2, sticky="w")
 
         self.button = tk.Button(form, text="Freigabe starten", command=self.toggle)
-        self.button.grid(row=6, column=0, columnspan=2, pady=(10, 2))
+        self.button.grid(row=8, column=0, columnspan=2, pady=(10, 2))
 
         self.status = tk.Label(root, text="Nicht aktiv", font=("TkDefaultFont", 13, "bold"))
         self.status.pack(pady=(0, 6))
@@ -692,10 +874,31 @@ class HostWindow:
 
         root.bind("<Return>", lambda _e: self.toggle() if self.server is None else None)
         (self.entries[2] if self.entries[1].get() else self.entries[1]).focus_set()
-        root.after(150, self.poll_log)
+        root.after(150, self.poll_queues)
 
         if autostart_launch:
-            self._start_from_saved()
+            if self.saved_creds is not None and self._begin(
+                    self.saved_creds, proto.clean_alias(saved.get("alias", "")) or default_alias(),
+                    int(saved.get("port", proto.DEFAULT_PORT))):
+                self.hide_to_background()
+            else:
+                log("[!] Keine gespeicherte Freigabe gefunden. Bitte Passwort eingeben und "
+                    "Freigabe starten.")
+
+    # ----------------------------- Hilfen -----------------------------
+    @staticmethod
+    def _stored_creds(saved):
+        try:
+            return Credentials.from_stored(str(saved["user"]), bytes.fromhex(saved["salt"]),
+                                           bytes.fromhex(saved["key"]))
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def _update_pw_hint(self):
+        text = ""
+        if self.saved_creds is not None:
+            text = "Passwort ist gespeichert – Felder leer lassen, um es weiter zu nutzen."
+        self.pw_hint.config(text=text)
 
     def set_status(self, text, color="black"):
         self.status.config(text=text, fg=color)
@@ -706,47 +909,49 @@ class HostWindow:
         else:
             self.stop()
 
-    # ----------------------------- Autostart -----------------------------
-    def _save_autostart(self):
-        """Speichert Alias, Benutzer, Port und den abgeleiteten Schlüssel (nicht das
-        Passwort) und trägt HopGrid in den Autostart ein."""
-        autostart.save_json(HOST_CONFIG, {
-            "alias": self.args.alias,
-            "user": self.creds.username,
-            "port": self.args.port,
-            "salt": self.creds.salt.hex(),
-            "key": self.creds.key.hex(),
-        }, private=True)
-        autostart.enable()
-        log("[*] Autostart aktiv: HopGrid gibt nach der Anmeldung automatisch frei")
+    # ----------------------------- Speichern -----------------------------
+    def _save_config(self):
+        """Speichert Alias, Benutzer und Port, mit Haken auch Salt + abgeleiteten
+        Schlüssel (nie das Passwort). Ohne Haken werden Zugangsdaten entfernt."""
+        data = {
+            "alias": proto.clean_alias(self.entries[0].get()),
+            "user": self.entries[1].get().strip(),
+            "port": self.args.port or proto.DEFAULT_PORT,
+            "remember": self.remember_var.get(),
+        }
+        creds = self.creds or self.saved_creds
+        keep_secret = self.remember_var.get() or self.autostart_var.get()
+        if keep_secret and creds is not None:
+            data.update(user=creds.username, salt=creds.salt.hex(), key=creds.key.hex())
+            self.saved_creds = creds
+        else:
+            self.saved_creds = None
+        try:
+            autostart.save_json(HOST_CONFIG, data, private=True)
+        except OSError as exc:
+            log(f"[!] Einstellungen konnten nicht gespeichert werden: {exc}")
+        self._update_pw_hint()
+
+    def on_remember_toggle(self):
+        self._save_config()
+        if not self.remember_var.get() and not self.autostart_var.get():
+            log("[*] Gespeicherte Zugangsdaten gelöscht")
 
     def on_autostart_toggle(self):
         try:
             if self.autostart_var.get():
-                if self.creds is not None:
-                    self._save_autostart()
-                else:
+                if self.creds is None and self.saved_creds is None:
                     log("[*] Autostart wird eingerichtet, sobald du die Freigabe startest")
+                    return
+                self._save_config()
+                autostart.enable()
+                log("[*] Autostart aktiv: HopGrid gibt nach der Anmeldung automatisch frei")
             else:
                 autostart.disable()
-                autostart.delete_json(HOST_CONFIG)
-                log("[*] Autostart aus, gespeicherte Zugangsdaten gelöscht")
+                self._save_config()
+                log("[*] Autostart aus")
         except OSError as exc:
             log(f"[!] Autostart konnte nicht geändert werden: {exc}")
-
-    def _start_from_saved(self):
-        saved = autostart.load_json(HOST_CONFIG)
-        try:
-            creds = Credentials.from_stored(
-                str(saved["user"]), bytes.fromhex(saved["salt"]), bytes.fromhex(saved["key"]))
-            port = int(saved["port"])
-            alias = proto.clean_alias(saved["alias"])
-        except (KeyError, ValueError, TypeError):
-            log("[!] Keine gespeicherte Freigabe gefunden. Bitte Passwort eingeben und "
-                "Freigabe starten.")
-            return
-        if self._begin(creds, alias, port):
-            self.root.iconify()  # im Hintergrund weiterlaufen
 
     # ----------------------------- Freigabe -----------------------------
     def start(self):
@@ -760,12 +965,6 @@ class HostWindow:
         if not username:
             self.set_status("Bitte Benutzernamen eingeben.", "#b00020")
             return
-        if len(password) < MIN_PASSWORD_LEN:
-            self.set_status(f"Passwort: mindestens {MIN_PASSWORD_LEN} Zeichen.", "#b00020")
-            return
-        if password != repeat:
-            self.set_status("Passwörter stimmen nicht überein.", "#b00020")
-            return
         try:
             port = int(self.entries[4].get().strip())
             if not 1 <= port <= 65535:
@@ -774,7 +973,20 @@ class HostWindow:
             self.set_status("Port muss eine Zahl von 1 bis 65535 sein.", "#b00020")
             return
 
-        creds = Credentials(username, password)
+        if not password and not repeat and self.saved_creds is not None:
+            if username != self.saved_creds.username:
+                self.set_status("Neuer Benutzername: bitte auch ein Passwort eingeben.",
+                                "#b00020")
+                return
+            creds = self.saved_creds
+        else:
+            if len(password) < MIN_PASSWORD_LEN:
+                self.set_status(f"Passwort: mindestens {MIN_PASSWORD_LEN} Zeichen.", "#b00020")
+                return
+            if password != repeat:
+                self.set_status("Passwörter stimmen nicht überein.", "#b00020")
+                return
+            creds = Credentials(username, password)
         del password, repeat
         for entry in self.entries[2:4]:
             entry.delete(0, "end")
@@ -809,9 +1021,11 @@ class HostWindow:
         log(f"[*] Freigabe gestartet: {address}, Monitor {self.args.monitor} "
             f"({monitor['width']}x{monitor['height']})")
         self.discovery = start_discovery(self.args)
+        self.keep_awake.start()
+        self._save_config()
         if self.autostart_var.get():
             try:
-                self._save_autostart()
+                autostart.enable()
             except OSError as exc:
                 log(f"[!] Autostart konnte nicht eingerichtet werden: {exc}")
         for hint in check_macos_permissions():
@@ -827,6 +1041,7 @@ class HostWindow:
         self.server = None
         self.creds = None
         close_active_connections()
+        self.keep_awake.stop()
         for entry in self.entries:
             entry.config(state="normal")
         self.button.config(text="Freigabe starten")
@@ -834,7 +1049,54 @@ class HostWindow:
         log("[*] Freigabe gestoppt")
         self.entries[2].focus_set()
 
-    def poll_log(self):
+    # ----------------------------- Hintergrund / Beenden -----------------------------
+    def hide_to_background(self):
+        """Fenster ausblenden, Freigabe läuft weiter."""
+        if sys.platform == "win32":
+            try:
+                if self.tray is None:
+                    self.tray = TrayIcon(lambda: self.ui_queue.put("open"),
+                                         lambda: self.ui_queue.put("quit"))
+            except Exception as exc:
+                log(f"[!] Symbol im Infobereich nicht möglich ({exc}), Fenster wird minimiert")
+                self.root.iconify()
+                return
+            self.root.withdraw()
+        elif sys.platform == "darwin":
+            self.root.withdraw()  # Klick auf das Dock-Symbol holt das Fenster zurück
+        else:
+            self.root.iconify()
+
+    def show_window(self, *_args):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def on_close(self):
+        if self.server is None:
+            self.quit_app()
+            return
+        self.show_window()
+        CloseDialog(self.root, on_background=self.hide_to_background, on_quit=self.quit_app)
+
+    def quit_app(self):
+        if self.server is not None:
+            self.stop()
+        if self.tray is not None:
+            self.tray.stop()
+        self.root.destroy()
+
+    def poll_queues(self):
+        while True:
+            try:
+                command = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if command == "open":
+                self.show_window()
+            elif command == "quit":
+                self.quit_app()
+                return
         lines = []
         while True:
             try:
@@ -848,12 +1110,38 @@ class HostWindow:
                 self.logbox.insert("end", f"{stamp}  {str(line).strip()}\n")
             self.logbox.see("end")
             self.logbox.config(state="disabled")
-        self.root.after(150, self.poll_log)
+        self.root.after(150, self.poll_queues)
 
-    def on_close(self):
-        if self.server is not None:
-            self.stop()
-        self.root.destroy()
+
+class CloseDialog:
+    """Frage beim Schließen: im Hintergrund weiterlaufen oder ganz beenden."""
+
+    def __init__(self, root, on_background, on_quit):
+        self.top = top = tk.Toplevel(root)
+        top.title("HopGrid")
+        top.transient(root)
+        top.resizable(False, False)
+        where = {"win32": "Symbol unten rechts im Infobereich",
+                 "darwin": "HopGrid bleibt im Dock"}.get(sys.platform, "minimiert")
+        tk.Label(top, text="Die Freigabe ist aktiv.", font=("TkDefaultFont", 13, "bold"),
+                 padx=20).pack(pady=(16, 4))
+        tk.Label(top, text="Soll HopGrid im Hintergrund weiterlaufen oder ganz beendet werden?",
+                 padx=20, wraplength=340).pack()
+        buttons = tk.Frame(top, padx=16, pady=14)
+        buttons.pack()
+        tk.Button(buttons, text=f"Im Hintergrund weiterlaufen\n({where})",
+                  command=lambda: self._choose(on_background)).pack(fill="x", pady=3)
+        tk.Button(buttons, text="Ganz beenden (Freigabe stoppen)",
+                  command=lambda: self._choose(on_quit)).pack(fill="x", pady=3)
+        tk.Button(buttons, text="Abbrechen", command=top.destroy).pack(fill="x", pady=3)
+        top.protocol("WM_DELETE_WINDOW", top.destroy)
+        top.grab_set()
+        top.focus_force()
+
+    def _choose(self, action):
+        self.top.grab_release()
+        self.top.destroy()
+        action()
 
 
 def run_gui(args):

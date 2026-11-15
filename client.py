@@ -18,6 +18,7 @@ import json
 import socket
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import messagebox
 
@@ -34,11 +35,18 @@ AUTH_TIMEOUT = 15
 STREAM_TIMEOUT = 10        # Host sendet spätestens alle 2 s ein Bild
 MOVE_INTERVAL_MS = 12      # Mausbewegungen bündeln (ca. 80 pro Sekunde)
 RENDER_INTERVAL_MS = 15
+PING_INTERVAL_MS = 2000      # Lebenszeichen an den Host, wenn sonst nichts gesendet wird
+RECONNECT_SECONDS = 120      # so lange wird nach einem Abbruch neu verbunden
+RECONNECT_PAUSE = 2.0
 CLIENT_CONFIG = "client.json"   # gemerkte Eingaben (ohne Passwort)
 
 
 class AuthError(Exception):
-    pass
+    """Login abgelehnt (falsches Passwort, gefälschter Host). Neu versuchen ist sinnlos."""
+
+
+class HostNotFound(ConnectionError):
+    """Alias im Netz nicht gefunden. Kann sich ändern, z. B. wenn der Host neu startet."""
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +77,7 @@ def resolve_target(target, port):
     try:
         return socket.gethostbyname(target), port  # z. B. "macbook.local"
     except OSError:
-        raise AuthError(f"„{target}“ nicht gefunden. Läuft der Host mit diesem Alias "
+        raise HostNotFound(f"„{target}“ nicht gefunden. Läuft der Host mit diesem Alias "
                         "im selben Netz und ist die Freigabe gestartet?") from None
 
 
@@ -84,6 +92,9 @@ def connect_and_authenticate(host, port, username, password):
         sock.settimeout(AUTH_TIMEOUT)
 
         challenge = proto.recv_plain(sock, proto.MSG_CHALLENGE)
+        if challenge.get("v") != proto.PROTOCOL_VERSION:
+            raise AuthError("Der Host hat eine andere HopGrid-Version. Bitte beide Rechner "
+                            "auf die neueste Version aktualisieren.")
         salt = proto.hex_field(challenge, "salt", 16)
         nonce = proto.hex_field(challenge, "nonce", 32)
         host_pub = proto.hex_field(challenge, "pub", 32)
@@ -164,8 +175,17 @@ class ClientApp:
         self.root = root
         self.args = args
         self.channel = None
-        self.running = False
+        self.running = False          # Empfang aktiv
+        self.session_ui = False       # Anzeige-Fenster ist offen
+        self.reconnecting = False
+        self.conn_params = None       # (host, port, user, password) für Neuverbinden
         self.error = None
+        self.overlay = None
+        self.last_send = 0.0
+        self.cmd_as_ctrl = bool(args.cmd_as_ctrl)
+        self.share_clipboard = True
+        self.clip_last = None         # zuletzt abgeglichener Text der Zwischenablage
+        self.clip_incoming = None     # vom Host empfangener Text (setzt der Hauptthread)
 
         self.frame_lock = threading.Lock()
         self.latest_frame = None      # zuletzt empfangenes Bild (vom Empfangs-Thread)
@@ -189,10 +209,13 @@ class ClientApp:
 
         root.title("HopGrid – Verbinden")
         root.protocol("WM_DELETE_WINDOW", self.close)
+        if sys.platform == "darwin":
+            # Cmd+Q soll nicht ohne Rückfrage die laufende Verbindung beenden
+            root.createcommand("::tk::mac::Quit", self.close)
         self._build_login()
 
     # ----------------------------- Login -----------------------------
-    def _build_login(self):
+    def _build_login(self, message=""):
         self.login = tk.Frame(self.root, padx=20, pady=20)
         self.login.pack(fill="both", expand=True)
 
@@ -216,16 +239,22 @@ class ClientApp:
         stored = passwords.load(self.entries[0].get(), self.entries[2].get())
         if stored:
             self.entries[3].insert(0, stored)
-        self.remember_var = tk.BooleanVar(value=bool(stored))
+        self.remember_var = tk.BooleanVar(value=saved.get("remember_password", True))
         if passwords.available():
             tk.Checkbutton(self.login, text="Passwort speichern (im Schlüsselbund des Systems)",
                            variable=self.remember_var).grid(row=4, column=1, columnspan=2,
                                                             sticky="w")
+        self.cmd_var = tk.BooleanVar(value=bool(saved.get("cmd_as_ctrl", self.cmd_as_ctrl)))
+        tk.Checkbutton(self.login, text="Cmd-/Windows-Taste als Strg senden",
+                       variable=self.cmd_var).grid(row=5, column=1, columnspan=2, sticky="w")
+        self.clip_var = tk.BooleanVar(value=bool(saved.get("share_clipboard", True)))
+        tk.Checkbutton(self.login, text="Zwischenablage teilen (Kopieren & Einfügen)",
+                       variable=self.clip_var).grid(row=6, column=1, columnspan=2, sticky="w")
 
-        self.status = tk.Label(self.login, text="", fg="#b00020")
-        self.status.grid(row=5, column=0, columnspan=3, pady=(8, 0))
+        self.status = tk.Label(self.login, text=message, fg="#b00020", wraplength=380)
+        self.status.grid(row=7, column=0, columnspan=3, pady=(8, 0))
         self.connect_btn = tk.Button(self.login, text="Verbinden", command=self.start_connect)
-        self.connect_btn.grid(row=6, column=0, columnspan=3, pady=(10, 0))
+        self.connect_btn.grid(row=8, column=0, columnspan=3, pady=(10, 0))
 
         self.root.bind("<Return>", lambda _e: self.start_connect())
         first_empty = next((e for e in self.entries if not e.get()), self.entries[-1])
@@ -271,12 +300,16 @@ class ClientApp:
         self.entries[1].delete(0, "end")
         self.entries[1].insert(0, str(found["port"]))
         self.status.config(text="")
+        stored = passwords.load(found["alias"], self.entries[2].get())
+        if stored:
+            self.entries[3].delete(0, "end")
+            self.entries[3].insert(0, stored)
         target = self.entries[2] if not self.entries[2].get() else self.entries[3]
         target.focus_set()
 
     # ----------------------------- Verbinden -----------------------------
     def start_connect(self):
-        if self.running or str(self.connect_btn["state"]) == "disabled":
+        if self.session_ui or str(self.connect_btn["state"]) == "disabled":
             return
         host = self.entries[0].get().strip()
         user = self.entries[2].get().strip()
@@ -284,58 +317,62 @@ class ClientApp:
         try:
             port = int(self.entries[1].get().strip())
         except ValueError:
-            self.status.config(text="Port muss eine Zahl sein.")
+            self.status.config(text="Port muss eine Zahl sein.", fg="#b00020")
             return
         if not host or not user or not password:
-            self.status.config(text="Bitte alle Felder ausfüllen.")
+            self.status.config(text="Bitte alle Felder ausfüllen.", fg="#b00020")
             return
+
+        remember = self.remember_var.get()
+        self.cmd_as_ctrl = self.cmd_var.get()
+        self.share_clipboard = self.clip_var.get()
+        # Einstellungen sofort merken, nicht erst nach erfolgreicher Verbindung
+        save_settings({"host": host, "port": port, "user": user,
+                       "remember_password": remember, "cmd_as_ctrl": self.cmd_as_ctrl,
+                       "share_clipboard": self.share_clipboard})
 
         self.connect_btn.config(state="disabled")
         self.status.config(text="Suche Host und verbinde …", fg="#444")
         self._connect_result = None
         threading.Thread(target=self._connect_worker,
-                         args=(host, port, user, password, self.remember_var.get()),
-                         daemon=True).start()
-        self.root.after(50, lambda: self._check_connect(host))
+                         args=(host, port, user, password, remember), daemon=True).start()
+        self.root.after(50, self._check_connect)
 
     def _connect_worker(self, host, port, user, password, remember):
         try:
             ip, real_port = resolve_target(host, port)
             channel = connect_and_authenticate(ip, real_port, user, password)
-            save_settings({"host": host, "port": port, "user": user})
             if remember:
                 passwords.store(host, user, password)
             else:
                 passwords.forget(host, user)
-            self._connect_result = ("ok", channel)
-        except AuthError as exc:
-            self._connect_result = ("error", str(exc))
+            self._connect_result = ("ok", channel, (host, port, user, password))
+        except (AuthError, HostNotFound) as exc:
+            self._connect_result = ("error", str(exc), None)
         except (OSError, ConnectionError, ValueError) as exc:
-            self._connect_result = ("error", f"Verbindung fehlgeschlagen: {exc}")
+            self._connect_result = ("error", f"Verbindung fehlgeschlagen: {exc}", None)
 
-    def _check_connect(self, host):
+    def _check_connect(self):
         if self._connect_result is None:
-            self.root.after(50, lambda: self._check_connect(host))
+            self.root.after(50, self._check_connect)
             return
-        kind, value = self._connect_result
+        kind, value, params = self._connect_result
         if kind == "error":
             self.status.config(text=value, fg="#b00020")
             self.connect_btn.config(state="normal")
-            self.entries[3].delete(0, "end")
             self.entries[3].focus_set()
             return
-        self.channel = value
-        self._start_session(host)
+        self.conn_params = params
+        self._start_session(params[0], value)
 
     # ----------------------------- Sitzung -----------------------------
-    def _start_session(self, host):
+    def _start_session(self, host, channel):
         self.root.unbind("<Return>")
         self.login.destroy()
         self.root.title(f"HopGrid – {host}")
         self.root.geometry("1024x640")
 
-        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0,
-                                takefocus=True)
+        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, takefocus=True)
         self.canvas.pack(fill="both", expand=True)
         self.image_item = self.canvas.create_image(0, 0, anchor="nw")
 
@@ -350,32 +387,48 @@ class ClientApp:
         c.bind("<Enter>", lambda _e: c.focus_set())
         c.focus_set()
 
-        self.running = True
-        threading.Thread(target=self._receive_loop, daemon=True).start()
+        self.session_ui = True
+        self._attach(channel)
         self.root.after(RENDER_INTERVAL_MS, self._render_tick)
+        self.root.after(PING_INTERVAL_MS, self._ping_tick)
+        self.root.after(500, self._clipboard_tick)
 
-    def _receive_loop(self):
+    def _attach(self, channel):
+        """Neuen (oder wiederhergestellten) Kanal in Betrieb nehmen."""
+        self.channel = channel
+        self.error = None
+        self.running = True
+        self.last_send = time.monotonic()
+        self.clip_last = None  # aktuelle Zwischenablage beim (Neu-)Verbinden an den Host geben
+        threading.Thread(target=self._receive_loop, args=(channel,), daemon=True).start()
+
+    def _receive_loop(self, channel):
         """Eigener Thread: Bilder empfangen und dekodieren."""
         try:
-            while self.running:
-                msg_type, payload = self.channel.recv()
-                if msg_type != proto.MSG_FRAME:
+            while self.running and channel is self.channel:
+                msg_type, payload = channel.recv()
+                if msg_type == proto.MSG_CLIPBOARD:
+                    self.clip_incoming = payload.decode("utf-8", errors="replace")
                     continue
-                image = Image.open(io.BytesIO(payload))
-                image.load()
+                if msg_type != proto.MSG_FRAME:
+                    continue  # z. B. Lebenszeichen (PING)
+                try:
+                    image = Image.open(io.BytesIO(payload))
+                    image.load()
+                except Exception:
+                    continue  # einzelnes kaputtes Bild überspringen
                 with self.frame_lock:
                     self.latest_frame = image
         except Exception as exc:
-            if self.running:
+            if self.running and channel is self.channel:
                 self.error = exc
 
     def _render_tick(self):
         """Hauptthread: neuestes Bild skaliert in das Fenster zeichnen."""
-        if not self.running:
+        if not self.session_ui:
             return
-        if self.error is not None:
-            self._connection_lost()
-            return
+        if self.error is not None and not self.reconnecting:
+            self._begin_reconnect()
 
         with self.frame_lock:
             new_frame, self.latest_frame = self.latest_frame, None
@@ -402,6 +455,39 @@ class ClientApp:
 
         self.root.after(RENDER_INTERVAL_MS, self._render_tick)
 
+    def _ping_tick(self):
+        """Lebenszeichen an den Host, damit er tote Verbindungen erkennt."""
+        if not self.session_ui:
+            return
+        if self.running and time.monotonic() - self.last_send >= PING_INTERVAL_MS / 1000:
+            self._send(proto.MSG_PING, b"")
+        self.root.after(1000, self._ping_tick)
+
+    def _clipboard_tick(self):
+        """Zwischenablage abgleichen: lokale Änderungen an den Host, Host-Text lokal setzen."""
+        if not self.session_ui:
+            return
+        if self.share_clipboard:
+            incoming, self.clip_incoming = self.clip_incoming, None
+            if incoming is not None:
+                try:
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(incoming)
+                    self.clip_last = incoming
+                except tk.TclError:
+                    pass
+            elif self.running and not self.reconnecting:
+                try:
+                    text = self.root.clipboard_get()
+                except tk.TclError:
+                    text = None  # leer oder kein Text (z. B. Bild)
+                if text and text != self.clip_last:
+                    self.clip_last = text
+                    data = text.encode("utf-8")
+                    if len(data) <= proto.MAX_CLIPBOARD:
+                        self._send(proto.MSG_CLIPBOARD, data)
+        self.root.after(500, self._clipboard_tick)
+
     def _fit_window(self, size):
         """Beim ersten Bild Fenstergröße an das Seitenverhältnis des Hosts anpassen."""
         iw, ih = size
@@ -411,14 +497,99 @@ class ClientApp:
         self.root.geometry(f"{int(iw * scale)}x{int(ih * scale)}")
         self.window_sized = True
 
+    # ----------------------------- Neuverbinden -----------------------------
+    def _show_overlay(self, text):
+        if self.overlay is None:
+            self.overlay = tk.Label(self.root, bg="#222", fg="white", padx=18, pady=12,
+                                    font=("TkDefaultFont", 13, "bold"))
+            self.overlay.place(relx=0.5, rely=0.5, anchor="center")
+        self.overlay.config(text=text)
+
+    def _hide_overlay(self):
+        if self.overlay is not None:
+            self.overlay.destroy()
+            self.overlay = None
+
+    def _begin_reconnect(self):
+        self.reconnecting = True
+        self.running = False
+        self._close_channel()
+        self.pressed_keys.clear()
+        self._reconnect_started = time.monotonic()
+        self._show_overlay("Verbindung unterbrochen – verbinde neu …")
+        self._reconnect_result = None
+        threading.Thread(target=self._reconnect_worker, daemon=True).start()
+        self.root.after(250, self._check_reconnect)
+
+    def _reconnect_worker(self):
+        host, port, user, password = self.conn_params
+        deadline = time.monotonic() + RECONNECT_SECONDS
+        last_error = "Zeit abgelaufen"
+        while self.session_ui and time.monotonic() < deadline:
+            try:
+                ip, real_port = resolve_target(host, port)
+                channel = connect_and_authenticate(ip, real_port, user, password)
+                self._reconnect_result = ("ok", channel)
+                return
+            except AuthError as exc:  # Passwort geändert o. Ä. – Wiederholen sinnlos
+                self._reconnect_result = ("error", str(exc))
+                return
+            except (OSError, ConnectionError, ValueError) as exc:
+                last_error = str(exc)
+            time.sleep(RECONNECT_PAUSE)
+        self._reconnect_result = ("error", last_error)
+
+    def _check_reconnect(self):
+        if not self.session_ui:
+            return
+        if self._reconnect_result is None:
+            waited = int(time.monotonic() - self._reconnect_started)
+            self._show_overlay(f"Verbindung unterbrochen – verbinde neu … ({waited} s)")
+            self.root.after(250, self._check_reconnect)
+            return
+        kind, value = self._reconnect_result
+        self.reconnecting = False
+        if kind == "ok":
+            self._hide_overlay()
+            self._attach(value)
+            return
+        self._end_session(f"Verbindung verloren: {value}")
+
+    def _close_channel(self):
+        if self.channel is not None:
+            try:
+                self.channel.sock.close()
+            except OSError:
+                pass
+
+    def _end_session(self, message=""):
+        """Zurück zum Login-Fenster (statt die App zu beenden)."""
+        self.session_ui = False
+        self.running = False
+        self._close_channel()
+        self.channel = None
+        self._hide_overlay()
+        self.canvas.destroy()
+        self.current_frame = self.latest_frame = self.photo = self.view = None
+        self.last_canvas_size = None
+        self.window_sized = False
+        self.pressed_keys.clear()
+        self.root.title("HopGrid – Verbinden")
+        self.root.geometry("")
+        self._build_login(message)
+
     # ----------------------------- Eingaben -----------------------------
-    def send_input(self, event):
-        if not self.running:
+    def _send(self, msg_type, payload):
+        if not self.running or self.reconnecting:
             return
         try:
-            self.channel.send(proto.MSG_INPUT, json.dumps(event).encode("utf-8"))
+            self.channel.send(msg_type, payload)
+            self.last_send = time.monotonic()
         except OSError as exc:
             self.error = exc
+
+    def send_input(self, event):
+        self._send(proto.MSG_INPUT, json.dumps(event).encode("utf-8"))
 
     def to_normalized(self, x, y, clamp=False):
         """Fensterkoordinaten -> 0..1 relativ zum Host-Bild. None, wenn außerhalb."""
@@ -475,15 +646,14 @@ class ClientApp:
             self.send_input({"t": "scroll", "dy": steps})
 
     def on_key_down(self, event):
-        desc = describe_key(event, self.args.cmd_as_ctrl)
+        desc = describe_key(event, self.cmd_as_ctrl)
         if desc is not None:
             self.pressed_keys[event.keycode] = desc
             self.send_input({"t": "key", "a": "down", **desc})
         return "break"  # verhindert lokale Tk-Aktionen (z. B. Fokuswechsel mit Tab)
 
     def on_key_up(self, event):
-        desc = self.pressed_keys.pop(event.keycode, None) or describe_key(
-            event, self.args.cmd_as_ctrl)
+        desc = self.pressed_keys.pop(event.keycode, None) or describe_key(event, self.cmd_as_ctrl)
         if desc is not None:
             self.send_input({"t": "key", "a": "up", **desc})
         return "break"
@@ -495,19 +665,13 @@ class ClientApp:
         self.pressed_keys.clear()
 
     # ----------------------------- Ende -----------------------------
-    def _connection_lost(self):
-        exc = self.error
-        self.running = False
-        messagebox.showerror("HopGrid", f"Verbindung zum Host verloren:\n{exc}")
-        self.close()
-
     def close(self):
+        if self.session_ui and not messagebox.askokcancel(
+                "HopGrid", "Verbindung trennen und HopGrid beenden?", parent=self.root):
+            return
+        self.session_ui = False
         self.running = False
-        if self.channel is not None:
-            try:
-                self.channel.sock.close()
-            except OSError:
-                pass
+        self._close_channel()
         self.root.destroy()
 
 

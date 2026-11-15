@@ -5,3 +5,5 @@ pynput
 Pillow
 cryptography
 keyring
+pyperclip
+pystray; sys_platform == "win32"
