@@ -13,6 +13,7 @@ if not exist .venv (
 .venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon assets\icon.ico ^
   --hidden-import host --hidden-import client --hidden-import keyring.backends.Windows ^
   --hidden-import pystray._win32 --hidden-import pyperclip --collect-data customtkinter ^
+  --collect-all tkinterdnd2 ^
   --add-data assets\icon.png;assets --add-data assets\icon.ico;assets ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^
   --hidden-import pynput._util.win32 --hidden-import pynput._util.win32_vks ^

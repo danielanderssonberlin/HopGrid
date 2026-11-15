@@ -43,6 +43,25 @@ S1, S2, S3, S4 = 4, 8, 16, 24
 RADIUS = 10
 
 
+def create_root():
+    """Hauptfenster; mit Drag & Drop (tkinterdnd2), falls verfügbar."""
+    try:
+        from tkinterdnd2 import TkinterDnD
+
+        class DnDRoot(ctk.CTk, TkinterDnD.DnDWrapper):
+            def __init__(self):
+                super().__init__()
+                self.TkdndVersion = TkinterDnD._require(self)
+
+        root = DnDRoot()
+        root.dnd_available = True
+    except Exception as exc:
+        print(f"Drag & Drop nicht verfügbar: {exc}", file=sys.stderr)
+        root = ctk.CTk()
+        root.dnd_available = False
+    return root
+
+
 def setup():
     ctk.set_appearance_mode(os.environ.get("HOPGRID_APPEARANCE", "system"))
     ctk.set_default_color_theme("blue")
@@ -400,3 +419,88 @@ class Banner:
     @property
     def visible(self):
         return self.widget is not None
+
+
+class TransferBar:
+    """Leiste unten im Verbindungsfenster für Dateiübertragungen.
+
+    Arten: 'progress' (mit Balken), 'success', 'error', 'offer' (mit Knopf),
+    'received' (Im Finder/Explorer zeigen + Griff zum Herausziehen)."""
+
+    def __init__(self, root):
+        self.root = root
+        self.frame = None
+        self.kind = None
+        self._hide_job = None
+        self._progress = None
+        self._label = None
+
+    def show(self, text, kind, fraction=None, action=None, files=None, hide_after=None):
+        if self._hide_job is not None:
+            self.root.after_cancel(self._hide_job)
+            self._hide_job = None
+        # Fortschritt nur aktualisieren statt neu aufbauen (kein Flackern)
+        if kind == "progress" and self.kind == "progress" and self.frame is not None:
+            self._label.configure(text=text)
+            if fraction is not None:
+                self._progress.set(max(0.0, min(1.0, fraction)))
+            return
+        self.hide()
+        self.kind = kind
+        color = {"error": DANGER, "success": SUCCESS}.get(kind, TEXT)
+        self.frame = ctk.CTkFrame(self.root, fg_color=CARD, border_color=BORDER, border_width=1,
+                                  corner_radius=12)
+        row = ctk.CTkFrame(self.frame, fg_color="transparent")
+        row.pack(fill="x", padx=S3, pady=(12, 12 if kind != "progress" else 6))
+        wrap = max(260, min(560, self.root.winfo_width() - 330))
+        self._label = label(row, text, "body", color, anchor="w", justify="left", wraplength=wrap)
+        self._label.pack(side="left", fill="x", expand=True)
+        if kind == "progress":
+            self._progress = ctk.CTkProgressBar(self.frame, height=6, corner_radius=3,
+                                                progress_color=PRIMARY, fg_color=NEUTRAL_BG)
+            self._progress.set(fraction or 0.0)
+            self._progress.pack(fill="x", padx=S3, pady=(0, 12))
+        else:
+            ctk.CTkButton(row, text="✕", width=30, height=30, corner_radius=8,
+                          fg_color="transparent", hover_color=SECONDARY, text_color=MUTED,
+                          command=self.hide).pack(side="right", padx=(S2, 0))
+        if kind == "offer" and action is not None:
+            primary_button(row, action[0], action[1], height=32).pack(side="right", padx=(S2, 0))
+        if kind == "received" and files:
+            import filetransfer
+            where = "Im Finder zeigen" if sys.platform == "darwin" else "Im Explorer zeigen"
+            secondary_button(row, where, lambda: filetransfer.reveal(files), height=32
+                             ).pack(side="right", padx=(S2, 0))
+            self._drag_handle(row, files)
+        self.frame.place(relx=0.5, rely=1.0, y=-16, anchor="s")
+        self.frame.lift()
+        if hide_after:
+            self._hide_job = self.root.after(hide_after, self.hide)
+
+    def _drag_handle(self, parent, files):
+        """Griff, mit dem man die empfangenen Dateien aus dem Fenster ziehen kann."""
+        if not getattr(self.root, "dnd_available", False):
+            return
+        from tkinterdnd2 import COPY, DND_FILES
+        handle = ctk.CTkLabel(parent, text="⠿  Herausziehen", corner_radius=8, height=32,
+                              fg_color=SECONDARY, text_color=TEXT, font=font("button"), padx=12)
+        handle.pack(side="right", padx=(S2, 0))
+
+        def init_drag(_event):
+            return (COPY, DND_FILES, tuple(files))
+
+        for widget in (handle, *handle.winfo_children()):
+            try:
+                widget.drag_source_register(1, DND_FILES)
+                widget.dnd_bind("<<DragInitCmd>>", init_drag)
+            except Exception:
+                pass
+        set_cursor(handle, HAND)
+
+    def hide(self):
+        if self.frame is not None:
+            self.frame.destroy()
+        self.frame = None
+        self.kind = None
+        self._progress = None
+        self._label = None

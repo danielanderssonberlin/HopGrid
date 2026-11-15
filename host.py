@@ -35,6 +35,7 @@ from pynput.mouse import Button  # noqa: E402
 from pynput.mouse import Controller as MouseController  # noqa: E402
 
 import autostart  # noqa: E402
+import filetransfer  # noqa: E402
 import customtkinter as ctk  # noqa: E402
 import ui  # noqa: E402
 import protocol as proto  # noqa: E402
@@ -518,6 +519,9 @@ class ClipboardSync:
         self.channel = channel
         self.stop = stop
         self._lock = threading.Lock()
+        self.offered_files = []      # in Finder/Explorer kopierte Dateien (Angebot an den Client)
+        self._last_files = filetransfer.clipboard_files()
+        threading.Thread(target=self._watch_files, daemon=True).start()
         try:
             import pyperclip
             self._clip = pyperclip
@@ -544,6 +548,24 @@ class ClipboardSync:
                     self.channel.send(proto.MSG_CLIPBOARD, data)
                 except OSError:
                     return
+
+    def _watch_files(self):
+        """Kopiert jemand auf dem Host Dateien (Cmd/Strg+C im Finder/Explorer), wird
+        dem Client angeboten, sie zu holen."""
+        while not self.stop.wait(0.7):
+            files = filetransfer.clipboard_files()
+            if files == self._last_files:
+                continue
+            self._last_files = files
+            self.offered_files = files
+            entries = filetransfer.collect(files) if files else []
+            offer = {"names": [os.path.basename(p.rstrip(os.sep)) for p in files][:5],
+                     "count": sum(1 for e in entries if not e[3]) or len(files),
+                     "bytes": sum(e[2] for e in entries)}
+            try:
+                self.channel.send(proto.MSG_FILES_OFFER, json.dumps(offer).encode("utf-8"))
+            except OSError:
+                return
 
     def set_from_client(self, payload):
         if self._clip is None or len(payload) > proto.MAX_CLIPBOARD:
@@ -655,11 +677,52 @@ def run_session(channel, ip, args, monitor):
     threading.Thread(target=watch_cursor_and_control, args=(channel, stop, monitor, state),
                      daemon=True).start()
     clipboard = ClipboardSync(channel, stop)
+
+    def on_files(kind, data):
+        if kind == "start":
+            log(f"[*] Empfange {filetransfer.describe(data['names'], data['count'])} "
+                f"({filetransfer.human_size(data['bytes'])}) von {ip}")
+        elif kind == "done":
+            if data["ok"]:
+                log(f"[+] Dateien abgelegt in {data['folder']}")
+                filetransfer.reveal(data["saved"])  # Ordner auf dem Host öffnen
+            else:
+                log(f"[!] Dateiempfang fehlgeschlagen: {data['error']}")
+
+    receiver = filetransfer.Receiver(channel, filetransfer.downloads_dir(), on_files)
+    sending = threading.Lock()
+
+    def send_offered():
+        if not sending.acquire(blocking=False):
+            return
+        try:
+            files = list(clipboard.offered_files)
+            if files:
+                log(f"[*] Sende {len(files)} kopierte Datei(en) an {ip}")
+                filetransfer.send_paths(channel, files)
+        except OSError as exc:
+            log(f"[!] Senden der Dateien abgebrochen: {exc}")
+        finally:
+            sending.release()
+
     try:
         while not stop.is_set():
             msg_type, payload = channel.recv()
             if msg_type == proto.MSG_CLIPBOARD:
                 clipboard.set_from_client(payload)
+                continue
+            if receiver.handle(msg_type, payload):
+                continue
+            if msg_type == proto.MSG_FILES_REQUEST:
+                threading.Thread(target=send_offered, daemon=True).start()
+                continue
+            if msg_type == proto.MSG_XFER_ACK:
+                try:
+                    ack = json.loads(payload)
+                    log("[+] Dateien beim Client angekommen" if ack.get("ok")
+                        else f"[!] Client konnte Dateien nicht speichern: {ack.get('error')}")
+                except ValueError:
+                    pass
                 continue
             if msg_type != proto.MSG_INPUT:
                 continue
@@ -1524,7 +1587,7 @@ class CloseDialog:
 
 def run_gui(args):
     ui.setup()
-    root = ctk.CTk()
+    root = ui.create_root()
     root.configure(fg_color=ui.BG)
     root.minsize(540, 300)
     ui.set_window_icon(root)

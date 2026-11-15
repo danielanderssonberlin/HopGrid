@@ -16,6 +16,8 @@ import hmac
 import io
 import ipaddress
 import json
+import os
+import queue
 import socket
 import sys
 import threading
@@ -28,6 +30,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 import autostart
+import filetransfer
 import passwords
 import ui
 import protocol as proto
@@ -223,6 +226,11 @@ class ClientApp:
         self.notice_incoming = None
         self.cursor_incoming = None   # (x, y, sichtbar) vom Host
         self.remote_pos = None
+        self.ui_events = queue.Queue()  # Meldungen aus Threads für die Oberfläche
+        self.sending_files = False
+        self.drop_hint = None
+        self.transfer_bar = None
+        self.receiver = None
         self.remote_cursor = None     # Canvas-Element des fremden Mauszeigers
         self.last_send = 0.0
         self.cmd_as_ctrl = bool(args.cmd_as_ctrl)
@@ -522,6 +530,9 @@ class ClientApp:
         c.bind("<Enter>", lambda _e: c.focus_set())
         c.focus_set()
 
+        self.transfer_bar = ui.TransferBar(self.root)
+        self._setup_file_drop()
+
         self.session_ui = True
         self._attach(channel)
         self.root.after(RENDER_INTERVAL_MS, self._render_tick)
@@ -535,6 +546,10 @@ class ClientApp:
         self.running = True
         self.last_send = time.monotonic()
         self.clip_last = None  # aktuelle Zwischenablage beim (Neu-)Verbinden an den Host geben
+        self.sending_files = False
+        self.receiver = filetransfer.Receiver(
+            channel, filetransfer.downloads_dir(),
+            lambda kind, data: self.ui_events.put(("recv", kind, data)))
         threading.Thread(target=self._receive_loop, args=(channel,), daemon=True).start()
 
     def _receive_loop(self, channel):
@@ -555,6 +570,16 @@ class ClientApp:
                     continue
                 if msg_type == proto.MSG_NOTICE:
                     self.notice_incoming = payload.decode("utf-8", errors="replace")
+                    continue
+                if self.receiver is not None and self.receiver.handle(msg_type, payload):
+                    continue
+                if msg_type in (proto.MSG_FILES_OFFER, proto.MSG_XFER_ACK):
+                    try:
+                        data = json.loads(payload)
+                    except ValueError:
+                        continue
+                    self.ui_events.put(("offer" if msg_type == proto.MSG_FILES_OFFER else "ack",
+                                        data))
                     continue
                 if msg_type != proto.MSG_FRAME:
                     continue  # z. B. Lebenszeichen (PING)
@@ -604,6 +629,12 @@ class ClientApp:
         if cursor is not None:
             self.remote_pos = cursor
             self._draw_remote_cursor()
+
+        while True:
+            try:
+                self._handle_ui_event(self.ui_events.get_nowait())
+            except queue.Empty:
+                break
 
         notice, self.notice_incoming = self.notice_incoming, None
         if notice is not None:
@@ -754,6 +785,10 @@ class ClientApp:
             self.notice_banner = None
         self.remote_cursor = None
         self.remote_pos = None
+        if self.transfer_bar is not None:
+            self.transfer_bar.hide()
+            self.transfer_bar = None
+        self.receiver = None
         self.canvas.destroy()
         self.current_frame = self.latest_frame = self.photo = self.view = None
         self.last_canvas_size = None
@@ -761,6 +796,105 @@ class ClientApp:
         self.pressed_keys.clear()
         self.root.title("HopGrid – Verbinden")
         self._build_login(message)
+
+    # ----------------------------- Dateien -----------------------------
+    def _setup_file_drop(self):
+        """Dateien/Ordner auf das Fenster ziehen = auf den anderen Rechner kopieren."""
+        if not getattr(self.root, "dnd_available", False):
+            return
+        from tkinterdnd2 import DND_FILES
+        self.canvas.drop_target_register(DND_FILES)
+        self.canvas.dnd_bind("<<DropEnter>>", self._on_drop_enter)
+        self.canvas.dnd_bind("<<DropPosition>>", lambda e: e.action)
+        self.canvas.dnd_bind("<<DropLeave>>", self._on_drop_leave)
+        self.canvas.dnd_bind("<<Drop>>", self._on_drop)
+
+    def _on_drop_enter(self, event):
+        if self.drop_hint is None:
+            self.drop_hint = ui.Banner(self.root)
+        self.drop_hint.show("Loslassen, um auf den anderen Rechner zu kopieren",
+                            "info", rely=0.5, anchor="center", y=0)
+        return event.action
+
+    def _on_drop_leave(self, event):
+        if self.drop_hint is not None:
+            self.drop_hint.hide()
+            self.drop_hint = None
+        return event.action
+
+    def _on_drop(self, event):
+        self._on_drop_leave(event)
+        paths = [p for p in self.root.tk.splitlist(event.data) if os.path.exists(p)]
+        if not paths:
+            return event.action
+        if not self.running or self.reconnecting:
+            self.transfer_bar.show("Gerade keine Verbindung – bitte gleich noch einmal.", "error")
+            return event.action
+        if self.sending_files:
+            self.transfer_bar.show("Es läuft schon eine Übertragung – bitte warten.", "error")
+            return event.action
+        self.sending_files = True
+        names = [os.path.basename(p.rstrip(os.sep)) for p in paths]
+        self.transfer_bar.show(f"Sende {filetransfer.describe(names, len(paths))} …", "progress",
+                               fraction=0.0)
+        threading.Thread(target=self._send_files, args=(paths, names), daemon=True).start()
+        return event.action
+
+    def _send_files(self, paths, names):
+        def progress(done, total):
+            self.ui_events.put(("send_progress", names, done, total))
+        try:
+            filetransfer.send_paths(self.channel, paths, progress)
+        except OSError as exc:
+            self.ui_events.put(("send_error", str(exc)))
+
+    def request_offered_files(self):
+        self.transfer_bar.show("Hole Dateien vom anderen Rechner …", "progress", fraction=0.0)
+        self._send(proto.MSG_FILES_REQUEST, b"")
+
+    def _handle_ui_event(self, item):
+        kind = item[0]
+        bar = self.transfer_bar
+        if kind == "send_progress":
+            _, names, done, total = item
+            pct = done / total if total else 1.0
+            bar.show(f"Sende {filetransfer.describe(names, len(names))} … {int(pct * 100)} %",
+                     "progress", fraction=pct)
+        elif kind == "send_error":
+            self.sending_files = False
+            bar.show(f"Senden abgebrochen: {item[1]}", "error")
+        elif kind == "ack":
+            self.sending_files = False
+            data = item[1]
+            if data.get("ok"):
+                bar.show("Auf dem anderen Rechner in Downloads › HopGrid abgelegt.", "success",
+                         hide_after=6000)
+            else:
+                bar.show(f"Der andere Rechner konnte die Dateien nicht speichern: "
+                         f"{data.get('error')}", "error")
+        elif kind == "offer":
+            data = item[1]
+            if int(data.get("count", 0)) > 0:
+                text = (f"Auf dem anderen Rechner kopiert: "
+                        f"{filetransfer.describe(data.get('names', []), int(data['count']))} "
+                        f"({filetransfer.human_size(int(data.get('bytes', 0)))})")
+                bar.show(text, "offer", action=("Hierher holen", self.request_offered_files))
+            elif bar.kind == "offer":
+                bar.hide()
+        elif kind == "recv":
+            _, event, data = item
+            if event == "start":
+                bar.show(f"Empfange {filetransfer.describe(data['names'], data['count'])} …",
+                         "progress", fraction=0.0)
+            elif event == "progress":
+                pct = data["done"] / data["total"] if data["total"] else 1.0
+                bar.show(f"Empfange … {int(pct * 100)} %", "progress", fraction=pct)
+            elif event == "done":
+                if data["ok"]:
+                    bar.show(f"{filetransfer.describe(data['names'], data['count'])} liegt in "
+                             "Downloads › HopGrid", "received", files=data["saved"])
+                else:
+                    bar.show(f"Empfang fehlgeschlagen: {data['error']}", "error")
 
     # ----------------------------- Eingaben -----------------------------
     def _send(self, msg_type, payload):
@@ -871,7 +1005,7 @@ def main():
 
     enable_dpi_awareness()
     ui.setup()
-    root = ctk.CTk()
+    root = ui.create_root()
     root.minsize(500, 300)
     ui.set_window_icon(root)
     ClientApp(root, args)

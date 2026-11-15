@@ -61,6 +61,14 @@ MSG_CLIPBOARD = 13  # beide Richtungen: Text der Zwischenablage (UTF-8)
 MAX_CLIPBOARD = 1024 * 1024
 MSG_NOTICE = 14  # Host -> Client: Hinweistext (leer = Hinweis weg), z. B. Steuerung blockiert
 MSG_CURSOR = 15  # Host -> Client: JSON {x, y, v} – Mausposition auf dem Host (normiert)
+# Dateiübertragung (beide Richtungen), Details in filetransfer.py
+MSG_XFER_START = 16
+MSG_XFER_ITEM = 17
+MSG_XFER_DATA = 18
+MSG_XFER_END = 19
+MSG_XFER_ACK = 20
+MSG_FILES_OFFER = 21    # Host -> Client: JSON {names, count, bytes} – Dateien auf dem Host kopiert
+MSG_FILES_REQUEST = 22  # Client -> Host: angebotene Dateien jetzt senden
 
 SECURE_HEADER = struct.Struct("!I")
 GCM_TAG_SIZE = 16

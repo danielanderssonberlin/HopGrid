@@ -128,7 +128,7 @@ def main():
     enable_dpi_awareness()  # vor dem ersten Fenster, sonst unscharf und Maus-Versatz
     args = parse_args()
     ui.setup()
-    root = ctk.CTk()
+    root = ui.create_root()
     App(root, args)
     root.mainloop()
 

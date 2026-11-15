@@ -43,6 +43,13 @@ Im Verbindungsfenster siehst du den Mauszeiger des anderen Rechners als weißen 
 
 Die Zwischenablage wird in beide Richtungen abgeglichen, bei Text bis 1 MB. Kopierst du auf deinem Rechner etwas, kannst du es im HopGrid-Fenster mit Strg+V bzw. Cmd+V einfügen, und umgekehrt. Ausschalten kannst du das mit dem Haken *Zwischenablage teilen*. Bilder und Dateien werden nicht übertragen.
 
+### Dateien und Ordner übertragen
+
+- **Hin zum anderen Rechner:** Dateien oder ganze Ordner auf das HopGrid-Fenster ziehen. Sie landen drüben in *Downloads › HopGrid*. Dort öffnet sich dann der Ordner, damit du sie direkt weiterverwenden kannst.
+- **Zurück zu dir:** Auf dem anderen Rechner Dateien im Finder oder Explorer kopieren (Cmd+C bzw. Strg+C). Unten im HopGrid-Fenster erscheint *Hierher holen*. Danach liegen sie bei dir in *Downloads › HopGrid*. Mit dem Griff *Herausziehen* ziehst du sie direkt an die gewünschte Stelle.
+- Ordnerstruktur und leere Ordner bleiben erhalten. Nichts wird überschrieben, bei gleichen Namen hängt HopGrid „(2)“ an. Die Übertragung ist wie alles andere verschlüsselt.
+- Eine Datei direkt aus dem *Bild* des anderen Rechners herausziehen geht nicht. Das Bild enthält keine echten Dateien. Dafür ist der Weg über Kopieren da.
+
 ### Stabile Verbindung
 
 - Reißt die Verbindung ab, zum Beispiel weil das WLAN kurz weg ist, verbindet der Client bis zu 2 Minuten lang automatisch neu.
@@ -139,6 +146,7 @@ PyInstaller kann nicht für ein anderes System bauen. Die `.exe` entsteht deshal
 | `hopgrid.py` | Startfenster: Auswahl Host oder Client |
 | `passwords.py` | Passwort im Schlüsselbund des Systems (keyring) |
 | `dpi.py` | Windows: richtige Skalierung (sonst unscharf, Maus-Versatz) |
+| `filetransfer.py` | Dateien/Ordner übertragen (Blöcke, sichere Pfade, kopierte Dateien in Finder/Explorer) |
 | `ui.py` | Design: Farben (hell/dunkel), Schriften, Bausteine (customtkinter) |
 | `autostart.py` | Autostart (Windows-Registry, macOS-LaunchAgent), Einstellungsdateien |
 | `protocol.py` | Login, Schlüsselaustausch, verschlüsselter Kanal |

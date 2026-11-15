@@ -18,7 +18,8 @@ fi
   --name HopGrid --osx-bundle-identifier com.kenomedia.hopgrid \
   --hidden-import host --hidden-import client --hidden-import keyring.backends.macOS \
   --hidden-import Foundation --hidden-import ApplicationServices --hidden-import pyperclip \
-  --collect-data customtkinter --add-data assets/icon.png:assets \
+  --collect-data customtkinter --collect-all tkinterdnd2 --hidden-import AppKit \
+  --add-data assets/icon.png:assets \
   --hidden-import pynput.keyboard._darwin --hidden-import pynput.mouse._darwin \
   --hidden-import pynput._util.darwin --hidden-import pynput._util.darwin_vks \
   hopgrid.py
