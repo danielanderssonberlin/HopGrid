@@ -15,7 +15,6 @@ import hmac
 import io
 import ipaddress
 import json
-import os
 import socket
 import sys
 import threading
@@ -24,6 +23,7 @@ from tkinter import messagebox
 
 from PIL import Image, ImageTk
 
+import autostart
 import protocol as proto
 
 MAX_FRAME = 50 * 1024 * 1024
@@ -32,6 +32,7 @@ AUTH_TIMEOUT = 15
 STREAM_TIMEOUT = 10        # Host sendet spätestens alle 2 s ein Bild
 MOVE_INTERVAL_MS = 12      # Mausbewegungen bündeln (ca. 80 pro Sekunde)
 RENDER_INTERVAL_MS = 15
+CLIENT_CONFIG = "client.json"   # gemerkte Eingaben (ohne Passwort)
 
 
 class AuthError(Exception):
@@ -41,31 +42,13 @@ class AuthError(Exception):
 # ---------------------------------------------------------------------------
 # Gemerkte Eingaben (ohne Passwort)
 # ---------------------------------------------------------------------------
-def settings_path():
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    elif sys.platform == "darwin":
-        base = os.path.expanduser("~/Library/Application Support")
-    else:
-        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "HopGrid", "client.json")
-
-
 def load_settings():
-    try:
-        with open(settings_path(), encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    return autostart.load_json(CLIENT_CONFIG)
 
 
 def save_settings(data):
-    path = settings_path()
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
+        autostart.save_json(CLIENT_CONFIG, data)
     except OSError:
         pass  # Merken ist nur Komfort
 

@@ -4,31 +4,44 @@ Schlanker Fernzugriff auf einen anderen Rechner **im eigenen lokalen Netz**, fü
 Ohne Cloud, ohne Konto, ohne externen Server: Der Client verbindet sich direkt mit dem Host, per IP-Adresse oder über einen frei wählbaren Namen (Alias).
 Die Verbindung ist Ende-zu-Ende verschlüsselt.
 
-- **HopGrid Host** läuft auf dem Rechner, der gesteuert wird. Er teilt den Bildschirm und führt Maus und Tastatur aus.
-- **HopGrid Client** läuft auf dem Rechner, an dem du sitzt. Er zeigt den fremden Bildschirm und überträgt deine Eingaben.
+Eine App für beide Seiten. Beim Start wählst du:
+
+- **Diesen Rechner freigeben** (Host): auf dem Rechner, der gesteuert wird. Er teilt den Bildschirm und führt Maus und Tastatur aus.
+- **Mit anderem Rechner verbinden** (Client): auf dem Rechner, an dem du sitzt. Er zeigt den fremden Bildschirm und überträgt deine Eingaben.
 
 ## Download
 
 Fertige Programme gibt es unter [Releases](../../releases):
 
-| System | Host | Client |
-|---|---|---|
-| Windows | `HopGrid-Host.exe` | `HopGrid-Client.exe` |
-| macOS Apple Silicon | `HopGrid-Host-macOS-arm64.zip` | `HopGrid-Client-macOS-arm64.zip` |
-| macOS Intel | `HopGrid-Host-macOS-x86_64.zip` | `HopGrid-Client-macOS-x86_64.zip` |
+| System | Datei |
+|---|---|
+| Windows | `HopGrid.exe` |
+| macOS Apple Silicon (M1 und neuer) | `HopGrid-macOS-arm64.zip` |
+| macOS Intel | `HopGrid-macOS-x86_64.zip` |
 
-Die Programme sind nicht von Apple oder Microsoft signiert. Beim ersten Start warnt das System deshalb:
+Die Programme sind noch nicht von Apple oder Microsoft signiert. Beim ersten Start blockt das System sie deshalb:
 
-- **macOS:** Rechtsklick auf die App > *Öffnen* > *Öffnen*. Alternativ im Terminal: `xattr -dr com.apple.quarantine "HopGrid Host.app"`
+- **macOS:** Die App einmal öffnen. Dann *Systemeinstellungen > Datenschutz & Sicherheit*, nach unten scrollen und bei „HopGrid wurde blockiert“ auf *Trotzdem öffnen* klicken. Seit macOS 15 geht das nur noch so, Rechtsklick > *Öffnen* reicht nicht mehr. Alternativ im Terminal: `xattr -dr com.apple.quarantine /Applications/HopGrid.app`
 - **Windows:** SmartScreen meldet „Der Computer wurde durch Windows geschützt“. Dann *Weitere Informationen* > *Trotzdem ausführen*.
 
 ## Benutzung
 
-1. Auf dem zu steuernden Rechner **HopGrid Host** starten. Einen **Alias** wählen (zum Beispiel `Büro-PC`, vorbelegt ist der Rechnername), Benutzername und Passwort (mindestens 8 Zeichen) vergeben und *Freigabe starten* klicken.
-2. Auf dem anderen Rechner **HopGrid Client** starten. Im Feld *Host* den Alias oder die IP-Adresse eingeben, dazu Benutzername und Passwort, dann *Verbinden* klicken. *Suchen …* listet alle laufenden Hosts im Netz auf.
+1. Auf dem zu steuernden Rechner HopGrid starten und **Diesen Rechner freigeben** wählen. Einen **Alias** wählen (zum Beispiel `Büro-PC`, vorbelegt ist der Rechnername), Benutzername und Passwort (mindestens 8 Zeichen) vergeben und *Freigabe starten* klicken.
+2. Auf dem anderen Rechner HopGrid starten und **Mit anderem Rechner verbinden** wählen. Im Feld *Host* den Alias oder die IP-Adresse eingeben, dazu Benutzername und Passwort, dann *Verbinden* klicken. *Suchen …* listet alle laufenden Hosts im Netz auf.
 3. Das Fenster zeigt den Bildschirm des Hosts. Maus, Scrollrad und Tastatur wirken auf dem Host.
 
 Mit *Freigabe stoppen* oder durch Schließen des Host-Fensters endet die Verbindung sofort.
+
+### Autostart
+
+Setze in der Freigabe den Haken **Bei der Anmeldung automatisch starten und freigeben**. Dann startet HopGrid bei jeder Anmeldung an Windows oder macOS, gibt sofort frei und legt das Fenster in die Taskleiste bzw. ins Dock.
+
+- **Windows:** Eintrag unter `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`
+- **macOS:** LaunchAgent `~/Library/LaunchAgents/com.kenomedia.hopgrid.plist`
+
+Damit der Start ohne Eingabe klappt, speichert HopGrid Alias, Benutzername, Port und den aus dem Passwort abgeleiteten Schlüssel. Das Passwort selbst wird nicht gespeichert. Die Datei liegt unter `%APPDATA%\HopGrid\host.json` bzw. `~/Library/Application Support/HopGrid/host.json` und ist nur für dein Benutzerkonto lesbar. Wer diese Datei hat, kann sich trotzdem anmelden. Haken entfernen löscht Autostart und Datei.
+
+HopGrid startet bei der **Anmeldung**, nicht schon beim Hochfahren. Den Anmeldebildschirm kann HopGrid nicht übertragen.
 
 ### Alias statt IP-Adresse
 
@@ -44,8 +57,8 @@ Der Client merkt sich Host, Port und Benutzernamen, aber nicht das Passwort.
 
 Der Host braucht zwei Freigaben unter **Systemeinstellungen > Datenschutz & Sicherheit**:
 
-- **Bildschirm- & Systemaudioaufnahme:** *HopGrid Host* aktivieren. Ohne diese Freigabe sieht der Client nur den Schreibtischhintergrund.
-- **Bedienungshilfen:** *HopGrid Host* aktivieren. Ohne diese Freigabe passieren keine Klicks und keine Tastatureingaben.
+- **Bildschirm- & Systemaudioaufnahme:** *HopGrid* aktivieren. Ohne diese Freigabe sieht der Client nur den Schreibtischhintergrund.
+- **Bedienungshilfen:** *HopGrid* aktivieren. Ohne diese Freigabe passieren keine Klicks und keine Tastatureingaben.
 
 Beim ersten Klick auf *Freigabe starten* fragt macOS selbst nach beiden Freigaben. Danach die App neu starten.
 
@@ -83,17 +96,20 @@ Voraussetzung ist Python 3.10 oder neuer.
 
 ```bash
 pip install -r requirements.txt
-python host.py           # Fenster; mit --cli im Terminal
-python client.py --host Büro-PC     # Alias oder IP
+python hopgrid.py                                # Auswahl Host/Client
+python hopgrid.py --mode client --host Büro-PC   # direkt verbinden (Alias oder IP)
+python host.py --cli                             # Host im Terminal
 ```
 
-Optionen für den Host: `--alias Büro-PC --port 8080 --fps 15 --quality 70 --max-width 1600 --monitor 1`
+Optionen für den Host: `--mode host --alias Büro-PC --port 8080 --fps 15 --quality 70 --max-width 1600 --monitor 1`
 
 ## Selbst bauen
 
-- **macOS:** `bash build_mac.sh` erzeugt `dist/HopGrid Host.app` und `dist/HopGrid Client.app`.
-- **Windows:** `build_windows.bat` erzeugt `dist\HopGrid-Host.exe` und `dist\HopGrid-Client.exe`.
+- **macOS:** `bash build_mac.sh` erzeugt `dist/HopGrid.app`.
+- **Windows:** `build_windows.bat` erzeugt `dist\HopGrid.exe`.
 - **GitHub Actions:** Ein Tag `v*` baut alle Varianten und legt sie als Release an.
+
+**macOS signieren und notarisieren:** Dafür braucht es ein Apple-Developer-Konto mit einem Zertifikat vom Typ „Developer ID Application“. Sind die Secrets `MAC_CERT_P12_BASE64`, `MAC_CERT_PASSWORD`, `MAC_SIGN_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID` und `APPLE_APP_PASSWORD` im Repo hinterlegt, signiert und notarisiert der Workflow die App automatisch. Dann entfällt die Gatekeeper-Sperre.
 
 PyInstaller kann nicht für ein anderes System bauen. Die `.exe` entsteht deshalb auf Windows, die `.app` auf macOS.
 
@@ -101,6 +117,8 @@ PyInstaller kann nicht für ein anderes System bauen. Die `.exe` entsteht deshal
 
 | Datei | Inhalt |
 |---|---|
+| `hopgrid.py` | Startfenster: Auswahl Host oder Client |
+| `autostart.py` | Autostart (Windows-Registry, macOS-LaunchAgent), Einstellungsdateien |
 | `protocol.py` | Login, Schlüsselaustausch, verschlüsselter Kanal |
 | `host.py` | Bildschirmaufnahme (mss und OpenCV als JPEG), Eingaben (pynput, auf macOS Quartz), Host-Fenster |
 | `client.py` | Login-Fenster, Anzeige (Tkinter und Pillow), Weitergabe der Eingaben |

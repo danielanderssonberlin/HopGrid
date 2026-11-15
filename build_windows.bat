@@ -1,5 +1,5 @@
 @echo off
-REM Baut HopGrid-Host.exe und HopGrid-Client.exe nach dist\ (je eine einzelne Datei).
+REM Baut dist\HopGrid.exe (Host und Client in einer Datei).
 REM Voraussetzung: Python 3.10+ von python.org (mit "Add to PATH").
 setlocal
 cd /d "%~dp0"
@@ -11,14 +11,13 @@ if not exist .venv (
 .venv\Scripts\python -m pip install -q -r requirements.txt pyinstaller || goto :error
 
 .venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon assets\icon.ico ^
+  --hidden-import host --hidden-import client ^
   --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 ^
   --hidden-import pynput._util.win32 --hidden-import pynput._util.win32_vks ^
-  --name HopGrid-Host host.py || goto :error
+  --name HopGrid hopgrid.py || goto :error
+del /q HopGrid.spec 2>nul
 
-.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon assets\icon.ico ^
-  --name HopGrid-Client client.py || goto :error
-
-echo Fertig: dist\HopGrid-Host.exe und dist\HopGrid-Client.exe
+echo Fertig: dist\HopGrid.exe
 exit /b 0
 
 :error

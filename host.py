@@ -49,6 +49,7 @@ from pynput.keyboard import Key, KeyCode  # noqa: E402
 from pynput.mouse import Button  # noqa: E402
 from pynput.mouse import Controller as MouseController  # noqa: E402
 
+import autostart  # noqa: E402
 import protocol as proto  # noqa: E402
 
 if sys.platform == "darwin":
@@ -64,6 +65,7 @@ MAX_FAILS = 5                # Fehlversuche pro IP bis zur Sperre
 BLOCK_SECONDS = 300          # Dauer der IP-Sperre
 KEEPALIVE_SECONDS = 2.0      # spätestens so oft ein Bild senden, auch ohne Änderung
 MIN_PASSWORD_LEN = 8
+HOST_CONFIG = "host.json"   # gespeicherte Freigabe für den Autostart
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +93,15 @@ class Credentials:
         self.username = username
         self.salt = os.urandom(16)
         self.key = proto.derive_password_key(password, self.salt, proto.PBKDF2_ITERATIONS)
+
+    @classmethod
+    def from_stored(cls, username, salt, key):
+        """Zugangsdaten aus der Autostart-Datei (Salt + abgeleiteter Schlüssel)."""
+        if not username or len(salt) != 16 or len(key) != 32:
+            raise ValueError("Gespeicherte Zugangsdaten sind unvollständig")
+        creds = cls.__new__(cls)
+        creds.username, creds.salt, creds.key = username, salt, key
+        return creds
 
     def verify(self, username, client_proof, transcript):
         expected = proto.make_proof(self.key, b"client", transcript)
@@ -640,26 +651,31 @@ def run_cli(args):
 # Fenster-Modus
 # ---------------------------------------------------------------------------
 class HostWindow:
-    def __init__(self, root, args):
+    """Fenster für die Freigabe. Mit autostart=True startet es sofort mit den
+    gespeicherten Zugangsdaten (Autostart bei der Anmeldung)."""
+
+    def __init__(self, root, args, autostart_launch=False):
         self.root = root
         self.args = args
         self.server = None
         self.stop_event = None
         self.discovery = None
+        self.creds = None
         self.log_queue = queue.Queue()
         set_log_handler(self.log_queue.put)
 
-        root.title("HopGrid Host")
-        root.minsize(460, 380)
+        saved = autostart.load_json(HOST_CONFIG)
+        root.title("HopGrid – Freigabe")
+        root.minsize(480, 420)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         form = tk.Frame(root, padx=16, pady=12)
         form.pack(fill="x")
-        rows = [("Alias (Name im Netz)", args.alias or default_alias(), ""),
-                ("Benutzername", args.user or "", ""),
+        rows = [("Alias (Name im Netz)", args.alias or saved.get("alias") or default_alias(), ""),
+                ("Benutzername", args.user or saved.get("user", ""), ""),
                 ("Passwort", "", "•"),
                 ("Passwort wiederholen", "", "•"),
-                ("Port", str(args.port), "")]
+                ("Port", str(args.port or saved.get("port", proto.DEFAULT_PORT)), "")]
         self.entries = []
         for row, (label, value, show) in enumerate(rows):
             tk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 10))
@@ -669,8 +685,15 @@ class HostWindow:
             self.entries.append(entry)
         form.columnconfigure(1, weight=1)
 
+        self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
+        self.autostart_box = tk.Checkbutton(
+            form, text="Bei der Anmeldung automatisch starten und freigeben",
+            variable=self.autostart_var, command=self.on_autostart_toggle)
+        if autostart.supported():
+            self.autostart_box.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
         self.button = tk.Button(form, text="Freigabe starten", command=self.toggle)
-        self.button.grid(row=5, column=0, columnspan=2, pady=(10, 2))
+        self.button.grid(row=6, column=0, columnspan=2, pady=(10, 2))
 
         self.status = tk.Label(root, text="Nicht aktiv", font=("TkDefaultFont", 13, "bold"))
         self.status.pack(pady=(0, 6))
@@ -679,8 +702,11 @@ class HostWindow:
         self.logbox.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         root.bind("<Return>", lambda _e: self.toggle() if self.server is None else None)
-        (self.entries[2] if args.user else self.entries[1]).focus_set()
+        (self.entries[2] if self.entries[1].get() else self.entries[1]).focus_set()
         root.after(150, self.poll_log)
+
+        if autostart_launch:
+            self._start_from_saved()
 
     def set_status(self, text, color="black"):
         self.status.config(text=text, fg=color)
@@ -691,6 +717,49 @@ class HostWindow:
         else:
             self.stop()
 
+    # ----------------------------- Autostart -----------------------------
+    def _save_autostart(self):
+        """Speichert Alias, Benutzer, Port und den abgeleiteten Schlüssel (nicht das
+        Passwort) und trägt HopGrid in den Autostart ein."""
+        autostart.save_json(HOST_CONFIG, {
+            "alias": self.args.alias,
+            "user": self.creds.username,
+            "port": self.args.port,
+            "salt": self.creds.salt.hex(),
+            "key": self.creds.key.hex(),
+        }, private=True)
+        autostart.enable()
+        log("[*] Autostart aktiv: HopGrid gibt nach der Anmeldung automatisch frei")
+
+    def on_autostart_toggle(self):
+        try:
+            if self.autostart_var.get():
+                if self.creds is not None:
+                    self._save_autostart()
+                else:
+                    log("[*] Autostart wird eingerichtet, sobald du die Freigabe startest")
+            else:
+                autostart.disable()
+                autostart.delete_json(HOST_CONFIG)
+                log("[*] Autostart aus, gespeicherte Zugangsdaten gelöscht")
+        except OSError as exc:
+            log(f"[!] Autostart konnte nicht geändert werden: {exc}")
+
+    def _start_from_saved(self):
+        saved = autostart.load_json(HOST_CONFIG)
+        try:
+            creds = Credentials.from_stored(
+                str(saved["user"]), bytes.fromhex(saved["salt"]), bytes.fromhex(saved["key"]))
+            port = int(saved["port"])
+            alias = proto.clean_alias(saved["alias"])
+        except (KeyError, ValueError, TypeError):
+            log("[!] Keine gespeicherte Freigabe gefunden. Bitte Passwort eingeben und "
+                "Freigabe starten.")
+            return
+        if self._begin(creds, alias, port):
+            self.root.iconify()  # im Hintergrund weiterlaufen
+
+    # ----------------------------- Freigabe -----------------------------
     def start(self):
         alias = proto.clean_alias(self.entries[0].get())
         username = self.entries[1].get().strip()
@@ -716,27 +785,33 @@ class HostWindow:
             self.set_status("Port muss eine Zahl von 1 bis 65535 sein.", "#b00020")
             return
 
+        creds = Credentials(username, password)
+        del password, repeat
+        for entry in self.entries[2:4]:
+            entry.delete(0, "end")
+        self._begin(creds, alias, port)
+
+    def _begin(self, creds, alias, port):
         self.args.port = port
         self.args.alias = alias
         try:
             monitor = prepare(self.args)
         except ValueError as exc:
             self.set_status(str(exc), "#b00020")
-            return
-        creds = Credentials(username, password)
-        del password, repeat
-        for entry in self.entries[2:4]:
-            entry.delete(0, "end")
-
+            return False
         try:
             self.server = open_server(self.args)
         except OSError as exc:
             self.set_status(f"Port {port} nicht verfügbar: {exc.strerror or exc}", "#b00020")
-            return
+            return False
 
+        self.creds = creds
         self.stop_event = threading.Event()
         threading.Thread(target=serve, args=(self.server, creds, self.args, monitor,
                                              self.stop_event), daemon=True).start()
+        for i, value in ((0, alias), (1, creds.username), (4, str(port))):
+            self.entries[i].delete(0, "end")
+            self.entries[i].insert(0, value)
         for entry in self.entries:
             entry.config(state="disabled")
         self.button.config(text="Freigabe stoppen")
@@ -745,8 +820,14 @@ class HostWindow:
         log(f"[*] Freigabe gestartet: {address}, Monitor {self.args.monitor} "
             f"({monitor['width']}x{monitor['height']})")
         self.discovery = start_discovery(self.args)
+        if self.autostart_var.get():
+            try:
+                self._save_autostart()
+            except OSError as exc:
+                log(f"[!] Autostart konnte nicht eingerichtet werden: {exc}")
         for hint in check_macos_permissions():
             log(f"[!] {hint}")
+        return True
 
     def stop(self):
         self.stop_event.set()
@@ -755,6 +836,7 @@ class HostWindow:
             self.discovery = None
         self.server.close()
         self.server = None
+        self.creds = None
         close_active_connections()
         for entry in self.entries:
             entry.config(state="normal")
@@ -787,7 +869,7 @@ class HostWindow:
 
 def run_gui(args):
     root = tk.Tk()
-    HostWindow(root, args)
+    HostWindow(root, args, autostart_launch=getattr(args, "autostart", False))
     root.mainloop()
 
 
@@ -795,7 +877,7 @@ def main():
     parser = argparse.ArgumentParser(description="HopGrid Host – Bildschirm im LAN teilen")
     parser.add_argument("--cli", action="store_true", help="Terminal statt Fenster")
     parser.add_argument("--bind", default="0.0.0.0", help="Adresse zum Lauschen (Standard: alle)")
-    parser.add_argument("--port", type=int, default=proto.DEFAULT_PORT)
+    parser.add_argument("--port", type=int, help=f"Port (Standard {proto.DEFAULT_PORT})")
     parser.add_argument("--alias", help="Name, unter dem der Host im LAN gefunden wird "
                                          "(Standard: Rechnername)")
     parser.add_argument("--user", help="Benutzername (vorausgefüllt)")
@@ -810,6 +892,7 @@ def main():
     args, _unknown = parser.parse_known_args()
 
     if args.cli:
+        args.port = args.port or proto.DEFAULT_PORT
         run_cli(args)
     else:
         run_gui(args)
