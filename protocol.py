@@ -19,9 +19,12 @@ Der Sitzungsschlüssel wird aus dem X25519-Geheimnis UND dem Passwort-Schlüssel
 
 import hashlib
 import hmac
+import ipaddress
 import json
+import socket
 import struct
 import threading
+import time
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
@@ -31,6 +34,12 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 PROTOCOL_ID = b"HopGrid-v2"
 DEFAULT_PORT = 8080
+
+# Suche im LAN per UDP-Broadcast: Client ruft, jeder Host antwortet mit Alias und Port.
+# So findet der Client einen Host über seinen Namen, auch wenn sich die IP ändert.
+DISCOVERY_PORT = 48080
+DISCOVERY_REQUEST = b"HOPGRID-DISCOVER-1"
+MAX_ALIAS_LEN = 32
 
 PBKDF2_ITERATIONS = 200_000
 MIN_ITERATIONS = 100_000
@@ -177,3 +186,78 @@ class SecureChannel:
         except InvalidTag as exc:
             raise ProtocolError("Manipulierte oder ungültige Daten empfangen") from exc
         return plaintext[0], plaintext[1:]
+
+
+# ---------------------------------------------------------------------------
+# Netzwerk-Hilfen und Host-Suche im LAN
+# ---------------------------------------------------------------------------
+def local_ip():
+    """Ermittelt die LAN-IP. UDP-connect sendet kein Paket, es wählt nur die Route."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+        except OSError:
+            return "127.0.0.1"
+
+
+def is_local_address(ip):
+    addr = ipaddress.ip_address(ip)
+    if getattr(addr, "ipv4_mapped", None):
+        addr = addr.ipv4_mapped
+    return addr.is_private or addr.is_loopback or addr.is_link_local
+
+
+def clean_alias(alias):
+    """Alias kürzen und Steuerzeichen entfernen."""
+    alias = "".join(ch for ch in str(alias) if ch.isprintable()).strip()
+    return alias[:MAX_ALIAS_LEN]
+
+
+def discovery_reply(alias, port):
+    return json.dumps({"hopgrid": 2, "alias": alias, "port": port}).encode("utf-8")
+
+
+def discover(timeout=1.5):
+    """Sucht HopGrid-Hosts im LAN. Liefert [{'alias', 'ip', 'port'}, ...].
+
+    Gesendet wird an 255.255.255.255 und zusätzlich an die /24-Broadcast-Adresse
+    des eigenen Netzes (manche Systeme schicken 255.255.255.255 nur über eine
+    Schnittstelle). Die Antwort ist nicht authentifiziert. Das ist unkritisch,
+    weil beim Login beide Seiten das Passwort beweisen müssen."""
+    targets = {"255.255.255.255"}
+    own_ip = local_ip()
+    if not own_ip.startswith("127."):
+        targets.add(own_ip.rsplit(".", 1)[0] + ".255")
+
+    found = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for _attempt in range(2):  # UDP kann verloren gehen
+            for target in targets:
+                try:
+                    sock.sendto(DISCOVERY_REQUEST, (target, DISCOVERY_PORT))
+                except OSError:
+                    pass
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            try:
+                data, addr = sock.recvfrom(2048)
+            except socket.timeout:
+                break
+            except OSError:
+                continue
+            try:
+                info = json.loads(data)
+                alias = clean_alias(info["alias"])
+                port = int(info["port"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if info.get("hopgrid") != 2 or not alias or not 1 <= port <= 65535:
+                continue
+            found[(addr[0], port)] = {"alias": alias, "ip": addr[0], "port": port}
+    return sorted(found.values(), key=lambda h: (h["alias"].casefold(), h["ip"]))

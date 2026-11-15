@@ -1,7 +1,7 @@
 # HopGrid
 
 Schlanker Fernzugriff auf einen anderen Rechner **im eigenen lokalen Netz**, für macOS und Windows.
-Ohne Cloud, ohne Konto, ohne externen Server: Der Client verbindet sich direkt mit der IP-Adresse des Hosts.
+Ohne Cloud, ohne Konto, ohne externen Server: Der Client verbindet sich direkt mit dem Host, per IP-Adresse oder über einen frei wählbaren Namen (Alias).
 Die Verbindung ist Ende-zu-Ende verschlüsselt.
 
 - **HopGrid Host** läuft auf dem Rechner, der gesteuert wird. Er teilt den Bildschirm und führt Maus und Tastatur aus.
@@ -24,11 +24,19 @@ Die Programme sind nicht von Apple oder Microsoft signiert. Beim ersten Start wa
 
 ## Benutzung
 
-1. Auf dem zu steuernden Rechner **HopGrid Host** starten. Benutzername und Passwort (mindestens 8 Zeichen) vergeben und *Freigabe starten* klicken. Das Fenster zeigt dann die Adresse an, zum Beispiel `192.168.1.20:8080`.
-2. Auf dem anderen Rechner **HopGrid Client** starten. IP-Adresse, Port, Benutzername und Passwort eingeben und *Verbinden* klicken.
+1. Auf dem zu steuernden Rechner **HopGrid Host** starten. Einen **Alias** wählen (zum Beispiel `Büro-PC`, vorbelegt ist der Rechnername), Benutzername und Passwort (mindestens 8 Zeichen) vergeben und *Freigabe starten* klicken.
+2. Auf dem anderen Rechner **HopGrid Client** starten. Im Feld *Host* den Alias oder die IP-Adresse eingeben, dazu Benutzername und Passwort, dann *Verbinden* klicken. *Suchen …* listet alle laufenden Hosts im Netz auf.
 3. Das Fenster zeigt den Bildschirm des Hosts. Maus, Scrollrad und Tastatur wirken auf dem Host.
 
 Mit *Freigabe stoppen* oder durch Schließen des Host-Fensters endet die Verbindung sofort.
+
+### Alias statt IP-Adresse
+
+Der Alias funktioniert auch dann, wenn der Router dem Host eine neue IP-Adresse gibt. Der Client ruft per UDP-Broadcast (Port 48080) ins lokale Netz, und jeder Host antwortet mit seinem Alias und seiner aktuellen Adresse. Ein Server ist dafür nicht nötig. Findet der Client keinen Host mit dem Alias, versucht er den Namen als normalen Rechnernamen aufzulösen, zum Beispiel `macbook.local`.
+
+Die Suche funktioniert nur im selben Netz. Gast-WLANs und getrennte Netze lassen Broadcasts meist nicht durch. Dann hilft nur die IP-Adresse.
+
+Der Client merkt sich Host, Port und Benutzernamen, aber nicht das Passwort.
 
 ## Einrichtung auf dem Host
 
@@ -43,7 +51,7 @@ Beim ersten Klick auf *Freigabe starten* fragt macOS selbst nach beiden Freigabe
 
 ### Windows
 
-- Beim ersten Start fragt die Windows-Firewall nach. Nur **Private Netzwerke** erlauben.
+- Beim ersten Start fragt die Windows-Firewall nach. Nur **Private Netzwerke** erlauben. Das gilt für die Verbindung (TCP 8080) und die Suche (UDP 48080).
 - Fenster, die als Administrator laufen (zum Beispiel der Task-Manager), und UAC-Abfragen nehmen nur dann Eingaben an, wenn auch der Host als Administrator läuft. Den Sperrbildschirm kann HopGrid nicht übertragen.
 
 ## Sicherheit
@@ -53,6 +61,7 @@ Beim ersten Klick auf *Freigabe starten* fragt macOS selbst nach beiden Freigabe
 - **Schlüssel:** Der Sitzungsschlüssel hängt zusätzlich vom Passwort ab (PBKDF2-SHA256, 200.000 Runden). Wer das Passwort nicht kennt, kann den Datenverkehr nicht mitlesen, auch nicht als Mittelsmann.
 - **Schutz vor Raten:** Nach jedem Fehlversuch wartet der Host 2 Sekunden. Nach 5 Fehlversuchen ist die IP-Adresse für 5 Minuten gesperrt.
 - **Nur LAN:** Der Host nimmt nur Verbindungen aus privaten Adressbereichen an. Es kann immer nur ein Client verbunden sein.
+- **Suche:** Die Antwort auf die Suche ist nicht signiert. Ein Gerät im Netz könnte sich also als dein Alias ausgeben. Es scheitert dann aber am Login, weil der Host das Passwort beweisen muss.
 
 Grenzen, die du kennen solltest:
 
@@ -75,10 +84,10 @@ Voraussetzung ist Python 3.10 oder neuer.
 ```bash
 pip install -r requirements.txt
 python host.py           # Fenster; mit --cli im Terminal
-python client.py --host 192.168.1.20
+python client.py --host Büro-PC     # Alias oder IP
 ```
 
-Optionen für den Host: `--port 8080 --fps 15 --quality 70 --max-width 1600 --monitor 1`
+Optionen für den Host: `--alias Büro-PC --port 8080 --fps 15 --quality 70 --max-width 1600 --monitor 1`
 
 ## Selbst bauen
 

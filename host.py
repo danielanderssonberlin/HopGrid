@@ -12,7 +12,6 @@ Start:
 import argparse
 import getpass
 import hmac
-import ipaddress
 import json
 import os
 import queue
@@ -455,21 +454,65 @@ def handle_client(conn, addr, creds, tracker, args, monitor, session_lock):
         log(f"[-] {ip} getrennt")
 
 
-def is_local_address(ip):
-    addr = ipaddress.ip_address(ip)
-    if getattr(addr, "ipv4_mapped", None):
-        addr = addr.ipv4_mapped
-    return addr.is_private or addr.is_loopback or addr.is_link_local
+is_local_address = proto.is_local_address
+local_ip = proto.local_ip
 
 
-def local_ip():
-    """Ermittelt die LAN-IP. UDP-connect sendet kein Paket, es wählt nur die Route."""
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+def default_alias():
+    """Rechnername ohne Domain, z. B. 'Daniels-MacBook-Pro'."""
+    return proto.clean_alias(socket.gethostname().split(".")[0]) or "HopGrid"
+
+
+class DiscoveryResponder:
+    """Beantwortet Suchanfragen der Clients im LAN mit Alias und Port."""
+
+    def __init__(self, alias, port, allow_public):
+        self.alias = alias
+        self.port = port
+        self.allow_public = allow_public
+        self._stop = threading.Event()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("", proto.DISCOVERY_PORT))
+        self._sock.settimeout(1.0)
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        reply = proto.discovery_reply(self.alias, self.port)
+        while not self._stop.is_set():
+            try:
+                data, addr = self._sock.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if data != proto.DISCOVERY_REQUEST:
+                continue
+            if not self.allow_public and not is_local_address(addr[0]):
+                continue
+            try:
+                self._sock.sendto(reply, addr)
+            except OSError:
+                pass
+
+    def stop(self):
+        self._stop.set()
         try:
-            s.connect(("10.255.255.255", 1))
-            return s.getsockname()[0]
+            self._sock.close()
         except OSError:
-            return "127.0.0.1"
+            pass
+
+
+def start_discovery(args):
+    """Startet die Suche-Antwort. Ohne sie geht nur die Verbindung per IP."""
+    try:
+        responder = DiscoveryResponder(args.alias, args.port, args.allow_public)
+        log(f"[*] Auffindbar als \"{args.alias}\"")
+        return responder
+    except OSError as exc:
+        log(f"[!] Suche im LAN nicht verfügbar (UDP {proto.DISCOVERY_PORT}: {exc}). "
+            "Verbinden per IP geht trotzdem.")
+        return None
 
 
 def prepare(args):
@@ -575,8 +618,10 @@ def run_cli(args):
     creds = Credentials(username, password)
     del password
 
+    args.alias = proto.clean_alias(args.alias or default_alias())
     server = open_server(args)
     log(f"[*] HopGrid Host läuft. Verbinden mit {local_ip()}:{args.port}")
+    discovery = start_discovery(args)
     log(f"[*] Monitor {args.monitor}: {monitor['width']}x{monitor['height']}, "
         f"{args.fps} FPS, JPEG {args.quality}. Beenden mit Strg+C.")
     for hint in check_macos_permissions():
@@ -586,6 +631,8 @@ def run_cli(args):
     except KeyboardInterrupt:
         log("\n[*] Beendet.")
     finally:
+        if discovery:
+            discovery.stop()
         server.close()
 
 
@@ -598,6 +645,7 @@ class HostWindow:
         self.args = args
         self.server = None
         self.stop_event = None
+        self.discovery = None
         self.log_queue = queue.Queue()
         set_log_handler(self.log_queue.put)
 
@@ -607,7 +655,8 @@ class HostWindow:
 
         form = tk.Frame(root, padx=16, pady=12)
         form.pack(fill="x")
-        rows = [("Benutzername", args.user or "", ""),
+        rows = [("Alias (Name im Netz)", args.alias or default_alias(), ""),
+                ("Benutzername", args.user or "", ""),
                 ("Passwort", "", "•"),
                 ("Passwort wiederholen", "", "•"),
                 ("Port", str(args.port), "")]
@@ -621,7 +670,7 @@ class HostWindow:
         form.columnconfigure(1, weight=1)
 
         self.button = tk.Button(form, text="Freigabe starten", command=self.toggle)
-        self.button.grid(row=4, column=0, columnspan=2, pady=(10, 2))
+        self.button.grid(row=5, column=0, columnspan=2, pady=(10, 2))
 
         self.status = tk.Label(root, text="Nicht aktiv", font=("TkDefaultFont", 13, "bold"))
         self.status.pack(pady=(0, 6))
@@ -630,7 +679,7 @@ class HostWindow:
         self.logbox.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         root.bind("<Return>", lambda _e: self.toggle() if self.server is None else None)
-        (self.entries[1] if args.user else self.entries[0]).focus_set()
+        (self.entries[2] if args.user else self.entries[1]).focus_set()
         root.after(150, self.poll_log)
 
     def set_status(self, text, color="black"):
@@ -643,9 +692,13 @@ class HostWindow:
             self.stop()
 
     def start(self):
-        username = self.entries[0].get().strip()
-        password = self.entries[1].get()
-        repeat = self.entries[2].get()
+        alias = proto.clean_alias(self.entries[0].get())
+        username = self.entries[1].get().strip()
+        password = self.entries[2].get()
+        repeat = self.entries[3].get()
+        if not alias:
+            self.set_status("Bitte einen Alias eingeben.", "#b00020")
+            return
         if not username:
             self.set_status("Bitte Benutzernamen eingeben.", "#b00020")
             return
@@ -656,7 +709,7 @@ class HostWindow:
             self.set_status("Passwörter stimmen nicht überein.", "#b00020")
             return
         try:
-            port = int(self.entries[3].get().strip())
+            port = int(self.entries[4].get().strip())
             if not 1 <= port <= 65535:
                 raise ValueError
         except ValueError:
@@ -664,6 +717,7 @@ class HostWindow:
             return
 
         self.args.port = port
+        self.args.alias = alias
         try:
             monitor = prepare(self.args)
         except ValueError as exc:
@@ -671,7 +725,7 @@ class HostWindow:
             return
         creds = Credentials(username, password)
         del password, repeat
-        for entry in self.entries[1:3]:
+        for entry in self.entries[2:4]:
             entry.delete(0, "end")
 
         try:
@@ -687,14 +741,18 @@ class HostWindow:
             entry.config(state="disabled")
         self.button.config(text="Freigabe stoppen")
         address = f"{local_ip()}:{port}"
-        self.set_status(f"Aktiv – verbinden mit {address}", "#1b7f3b")
+        self.set_status(f"Aktiv – Alias \"{alias}\" oder {address}", "#1b7f3b")
         log(f"[*] Freigabe gestartet: {address}, Monitor {self.args.monitor} "
             f"({monitor['width']}x{monitor['height']})")
+        self.discovery = start_discovery(self.args)
         for hint in check_macos_permissions():
             log(f"[!] {hint}")
 
     def stop(self):
         self.stop_event.set()
+        if self.discovery:
+            self.discovery.stop()
+            self.discovery = None
         self.server.close()
         self.server = None
         close_active_connections()
@@ -703,7 +761,7 @@ class HostWindow:
         self.button.config(text="Freigabe starten")
         self.set_status("Nicht aktiv")
         log("[*] Freigabe gestoppt")
-        self.entries[1].focus_set()
+        self.entries[2].focus_set()
 
     def poll_log(self):
         lines = []
@@ -738,6 +796,8 @@ def main():
     parser.add_argument("--cli", action="store_true", help="Terminal statt Fenster")
     parser.add_argument("--bind", default="0.0.0.0", help="Adresse zum Lauschen (Standard: alle)")
     parser.add_argument("--port", type=int, default=proto.DEFAULT_PORT)
+    parser.add_argument("--alias", help="Name, unter dem der Host im LAN gefunden wird "
+                                         "(Standard: Rechnername)")
     parser.add_argument("--user", help="Benutzername (vorausgefüllt)")
     parser.add_argument("--fps", type=int, default=15, help="Bilder pro Sekunde (1-60)")
     parser.add_argument("--quality", type=int, default=70, help="JPEG-Qualität (10-95)")

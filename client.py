@@ -13,7 +13,9 @@ Start:
 import argparse
 import hmac
 import io
+import ipaddress
 import json
+import os
 import socket
 import sys
 import threading
@@ -34,6 +36,56 @@ RENDER_INTERVAL_MS = 15
 
 class AuthError(Exception):
     pass
+
+
+# ---------------------------------------------------------------------------
+# Gemerkte Eingaben (ohne Passwort)
+# ---------------------------------------------------------------------------
+def settings_path():
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "HopGrid", "client.json")
+
+
+def load_settings():
+    try:
+        with open(settings_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(data):
+    path = settings_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass  # Merken ist nur Komfort
+
+
+def resolve_target(target, port):
+    """IP direkt verwenden, sonst Alias im LAN suchen, zuletzt als Rechnername auflösen.
+    Liefert (ip, port)."""
+    try:
+        ipaddress.ip_address(target)
+        return target, port
+    except ValueError:
+        pass
+    for found in proto.discover():
+        if found["alias"].casefold() == target.casefold():
+            return found["ip"], found["port"]
+    try:
+        return socket.gethostbyname(target), port  # z. B. "macbook.local"
+    except OSError:
+        raise AuthError(f"„{target}“ nicht gefunden. Läuft der Host mit diesem Alias "
+                        "im selben Netz und ist die Freigabe gestartet?") from None
 
 
 def connect_and_authenticate(host, port, username, password):
@@ -159,9 +211,10 @@ class ClientApp:
         self.login = tk.Frame(self.root, padx=20, pady=20)
         self.login.pack(fill="both", expand=True)
 
-        fields = [("IP-Adresse des Hosts", self.args.host or ""),
-                  ("Port", str(self.args.port)),
-                  ("Benutzername", self.args.user or ""),
+        saved = load_settings()
+        fields = [("Host (Alias oder IP)", self.args.host or saved.get("host", "")),
+                  ("Port", str(self.args.port or saved.get("port", proto.DEFAULT_PORT))),
+                  ("Benutzername", self.args.user or saved.get("user", "")),
                   ("Passwort", "")]
         self.entries = []
         for row, (label, value) in enumerate(fields):
@@ -171,15 +224,62 @@ class ClientApp:
             entry.grid(row=row, column=1, pady=4)
             self.entries.append(entry)
 
+        self.search_btn = tk.Button(self.login, text="Suchen …", command=self.start_search)
+        self.search_btn.grid(row=0, column=2, padx=(8, 0))
+
         self.status = tk.Label(self.login, text="", fg="#b00020")
-        self.status.grid(row=4, column=0, columnspan=2, pady=(8, 0))
+        self.status.grid(row=4, column=0, columnspan=3, pady=(8, 0))
         self.connect_btn = tk.Button(self.login, text="Verbinden", command=self.start_connect)
-        self.connect_btn.grid(row=5, column=0, columnspan=2, pady=(10, 0))
+        self.connect_btn.grid(row=5, column=0, columnspan=3, pady=(10, 0))
 
         self.root.bind("<Return>", lambda _e: self.start_connect())
         first_empty = next((e for e in self.entries if not e.get()), self.entries[-1])
         first_empty.focus_set()
 
+    # ----------------------------- Suche -----------------------------
+    def start_search(self):
+        self.search_btn.config(state="disabled")
+        self.status.config(text="Suche Hosts im Netz …", fg="#444")
+        self._search_result = None
+
+        def worker():
+            try:
+                self._search_result = proto.discover()
+            except OSError:
+                self._search_result = []
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(100, self._check_search)
+
+    def _check_search(self):
+        if self._search_result is None:
+            self.root.after(100, self._check_search)
+            return
+        self.search_btn.config(state="normal")
+        hosts = self._search_result
+        if not hosts:
+            self.status.config(text="Kein Host gefunden. Ist die Freigabe gestartet?",
+                               fg="#b00020")
+            return
+        self.status.config(text=f"{len(hosts)} Host(s) gefunden – bitte auswählen.", fg="#444")
+        menu = tk.Menu(self.root, tearoff=0)
+        for found in hosts:
+            menu.add_command(label=f"{found['alias']}   ({found['ip']}:{found['port']})",
+                             command=lambda h=found: self._pick_host(h))
+        x = self.search_btn.winfo_rootx()
+        y = self.search_btn.winfo_rooty() + self.search_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def _pick_host(self, found):
+        self.entries[0].delete(0, "end")
+        self.entries[0].insert(0, found["alias"])
+        self.entries[1].delete(0, "end")
+        self.entries[1].insert(0, str(found["port"]))
+        self.status.config(text="")
+        target = self.entries[2] if not self.entries[2].get() else self.entries[3]
+        target.focus_set()
+
+    # ----------------------------- Verbinden -----------------------------
     def start_connect(self):
         if self.running or str(self.connect_btn["state"]) == "disabled":
             return
@@ -196,7 +296,7 @@ class ClientApp:
             return
 
         self.connect_btn.config(state="disabled")
-        self.status.config(text="Verbinde …", fg="#444")
+        self.status.config(text="Suche Host und verbinde …", fg="#444")
         self._connect_result = None
         threading.Thread(target=self._connect_worker,
                          args=(host, port, user, password), daemon=True).start()
@@ -204,7 +304,10 @@ class ClientApp:
 
     def _connect_worker(self, host, port, user, password):
         try:
-            self._connect_result = ("ok", connect_and_authenticate(host, port, user, password))
+            ip, real_port = resolve_target(host, port)
+            channel = connect_and_authenticate(ip, real_port, user, password)
+            save_settings({"host": host, "port": port, "user": user})
+            self._connect_result = ("ok", channel)
         except AuthError as exc:
             self._connect_result = ("error", str(exc))
         except (OSError, ConnectionError, ValueError) as exc:
@@ -410,8 +513,8 @@ class ClientApp:
 
 def main():
     parser = argparse.ArgumentParser(description="HopGrid Client – Host im LAN fernsteuern")
-    parser.add_argument("--host", help="IP-Adresse des Hosts (vorausgefüllt)")
-    parser.add_argument("--port", type=int, default=proto.DEFAULT_PORT)
+    parser.add_argument("--host", help="Alias oder IP-Adresse des Hosts (vorausgefüllt)")
+    parser.add_argument("--port", type=int, help=f"Port (Standard {proto.DEFAULT_PORT})")
     parser.add_argument("--user", help="Benutzername (vorausgefüllt)")
     parser.add_argument("--cmd-as-ctrl", action="store_true",
                         help="Cmd/Windows-Taste als Strg senden (Mac steuert Windows)")
