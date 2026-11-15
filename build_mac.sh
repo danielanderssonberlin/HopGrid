@@ -27,6 +27,16 @@ rm -f HopGrid.spec
 APP="dist/HopGrid.app"
 ZIP="dist/HopGrid-macOS.zip"
 
+# Erklärtexte für die macOS-Abfragen (Lokales Netzwerk usw.), danach neu signieren
+PLIST="$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :NSLocalNetworkUsageDescription string 'HopGrid verbindet sich direkt mit Rechnern in deinem lokalen Netz und sucht dort nach Freigaben.'" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string 'HopGrid steuert diesen Rechner, wenn du ihn freigibst.'" "$PLIST" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${HOPGRID_VERSION:-0.0.0}" "$PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${HOPGRID_VERSION:-0.0.0}" "$PLIST"
+if [ -z "${MAC_SIGN_IDENTITY:-}" ]; then
+  codesign --force --deep --sign - "$APP"
+fi
+
 if [ -n "${MAC_SIGN_IDENTITY:-}" ]; then
   echo "Signiere mit: $MAC_SIGN_IDENTITY"
   codesign --force --deep --options runtime --timestamp \

@@ -11,6 +11,7 @@ Start:
 """
 
 import argparse
+import errno
 import hmac
 import io
 import ipaddress
@@ -84,12 +85,45 @@ def resolve_target(target, port):
                         "im selben Netz und ist die Freigabe gestartet?") from None
 
 
+# "Nicht erreichbar"-Fehler, die beim ersten Versuch oft vorübergehend sind:
+# Zielrechner muss erst per ARP antworten (Energiesparmodus), oder macOS gibt die
+# Freigabe "Lokales Netzwerk" erst nach dem ersten Versuch frei.
+TRANSIENT_ERRORS = {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN,
+                    10065, 10051, 10060}  # Windows: WSAEHOSTUNREACH, WSAENETUNREACH, WSAETIMEDOUT
+CONNECT_ATTEMPTS = 4
+
+
+def open_connection(host, port):
+    """TCP-Verbindung mit kurzen Wiederholungen bei vorübergehenden Netzfehlern."""
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        try:
+            return socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+        except OSError as exc:
+            code = getattr(exc, "winerror", None) or exc.errno
+            transient = code in TRANSIENT_ERRORS or isinstance(exc, socket.timeout)
+            if not transient or attempt == CONNECT_ATTEMPTS:
+                raise
+            time.sleep(0.6 * attempt)
+
+
+def friendly_error(exc):
+    """Technische Netzwerkfehler in verständliche Sätze übersetzen."""
+    code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+    if isinstance(exc, ConnectionRefusedError) or code in (errno.ECONNREFUSED, 10061):
+        return ("Der Rechner ist erreichbar, aber dort läuft keine Freigabe. "
+                "Bitte auf dem anderen Rechner „Freigabe starten“ klicken.")
+    if isinstance(exc, socket.timeout) or code in TRANSIENT_ERRORS:
+        return ("Der Rechner ist nicht erreichbar. Ist er eingeschaltet, im selben Netz und "
+                "lässt seine Firewall HopGrid zu?")
+    return f"Verbindung fehlgeschlagen: {exc}"
+
+
 def connect_and_authenticate(host, port, username, password):
     """Baut die Verbindung auf, meldet sich an und liefert einen verschlüsselten Kanal.
 
     Das Passwort selbst wird nie gesendet. Der Host muss seinerseits beweisen, dass er
     das Passwort kennt, sonst bricht der Client ab (Schutz vor gefälschtem Host)."""
-    sock = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+    sock = open_connection(host, port)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.settimeout(AUTH_TIMEOUT)
@@ -447,7 +481,7 @@ class ClientApp:
         except (AuthError, HostNotFound) as exc:
             self._connect_result = ("error", str(exc), None)
         except (OSError, ConnectionError, ValueError) as exc:
-            self._connect_result = ("error", f"Verbindung fehlgeschlagen: {exc}", None)
+            self._connect_result = ("error", friendly_error(exc), None)
 
     def _check_connect(self):
         if self._connect_result is None:
