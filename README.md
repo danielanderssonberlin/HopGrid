@@ -32,7 +32,7 @@ Die Programme sind noch nicht von Apple oder Microsoft signiert. Beim ersten Sta
 
 Mit *Freigabe stoppen* endet die Verbindung sofort. Schließt du das Freigabe-Fenster, fragt HopGrid: **im Hintergrund weiterlaufen** (Windows: Symbol unten rechts im Infobereich, macOS: im Dock) oder **ganz beenden**. Mit *Auswahl merken* fragt HopGrid nicht mehr. Unter *Erweitert* > *Beim Schließen wieder fragen* lässt sich das zurücksetzen.
 
-Im Verbindungsfenster siehst du den Mauszeiger des anderen Rechners als weißen Pfeil. Kommt die Steuerung auf dem Host nicht an, zeigt ein gelbes Banner den Grund und die Abhilfe, zum Beispiel fehlende Bedienungshilfen auf dem Mac oder ein Admin-Fenster unter Windows.
+Im Verbindungsfenster siehst du den Mauszeiger des anderen Rechners in seiner aktuellen Form: Pfeil, Textcursor, Doppelpfeil zum Größenändern und weitere. Dein eigener Zeiger übernimmt die Form ebenfalls. Im Menü *Verbindung* lässt sich während der Sitzung umschalten: fremden Zeiger anzeigen, Zeigerform übernehmen, Zwischenablage teilen, Cmd als Strg. Kommt die Steuerung auf dem Host nicht an, zeigt ein gelbes Banner den Grund und die Abhilfe, zum Beispiel fehlende Bedienungshilfen auf dem Mac oder ein Admin-Fenster unter Windows.
 
 ### Einstellungen speichern
 
@@ -45,7 +45,8 @@ Die Zwischenablage wird in beide Richtungen abgeglichen, bei Text bis 1 MB. Kopi
 
 ### Dateien und Ordner übertragen
 
-- **Hin zum anderen Rechner:** Dateien oder ganze Ordner auf das HopGrid-Fenster ziehen. Sie landen drüben in *Downloads › HopGrid*. Dort öffnet sich dann der Ordner, damit du sie direkt weiterverwenden kannst.
+- **Hin zum anderen Rechner:** Dateien oder ganze Ordner auf das Bild des anderen Rechners ziehen und dort loslassen, wo sie hin sollen: auf den Schreibtisch oder in ein Finder- bzw. Explorer-Fenster. Liegt dort etwas anderes, zum Beispiel ein Browser, wird nichts kopiert, und HopGrid sagt dir, warum. Auf dem Mac fragt macOS beim ersten Mal, ob HopGrid den Finder abfragen darf. *Erlauben* wählen.
+- **Ohne Ziehen:** Menü *Verbindung* > *Dateien senden …* bzw. *Ordner senden …* legt dort ab, wo der Zeiger auf dem anderen Rechner gerade steht.
 - **Zurück zu dir:** Auf dem anderen Rechner Dateien im Finder oder Explorer kopieren (Cmd+C bzw. Strg+C). Unten im HopGrid-Fenster erscheint *Hierher holen*. Danach liegen sie bei dir in *Downloads › HopGrid*. Mit dem Griff *Herausziehen* ziehst du sie direkt an die gewünschte Stelle.
 - Ordnerstruktur und leere Ordner bleiben erhalten. Nichts wird überschrieben, bei gleichen Namen hängt HopGrid „(2)“ an. Die Übertragung ist wie alles andere verschlüsselt.
 - Eine Datei direkt aus dem *Bild* des anderen Rechners herausziehen geht nicht. Das Bild enthält keine echten Dateien. Dafür ist der Weg über Kopieren da.
@@ -146,6 +147,7 @@ PyInstaller kann nicht für ein anderes System bauen. Die `.exe` entsteht deshal
 | `hopgrid.py` | Startfenster: Auswahl Host oder Client |
 | `passwords.py` | Passwort im Schlüsselbund des Systems (keyring) |
 | `dpi.py` | Windows: richtige Skalierung (sonst unscharf, Maus-Versatz) |
+| `hostplatform.py` | Host: Zeigerform erkennen, Ordner unter dem Zeiger (Schreibtisch, Finder, Explorer) |
 | `filetransfer.py` | Dateien/Ordner übertragen (Blöcke, sichere Pfade, kopierte Dateien in Finder/Explorer) |
 | `ui.py` | Design: Farben (hell/dunkel), Schriften, Bausteine (customtkinter) |
 | `autostart.py` | Autostart (Windows-Registry, macOS-LaunchAgent), Einstellungsdateien |

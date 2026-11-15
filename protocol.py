@@ -69,6 +69,8 @@ MSG_XFER_END = 19
 MSG_XFER_ACK = 20
 MSG_FILES_OFFER = 21    # Host -> Client: JSON {names, count, bytes} – Dateien auf dem Host kopiert
 MSG_FILES_REQUEST = 22  # Client -> Host: angebotene Dateien jetzt senden
+MSG_DROP_QUERY = 23     # Client -> Host: JSON {x, y} – wohin würden abgelegte Dateien kommen?
+MSG_DROP_TARGET = 24    # Host -> Client: JSON {ok, label, reason} – Ordner unter dem Zeiger
 
 SECURE_HEADER = struct.Struct("!I")
 GCM_TAG_SIZE = 16

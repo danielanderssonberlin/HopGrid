@@ -36,6 +36,7 @@ from pynput.mouse import Controller as MouseController  # noqa: E402
 
 import autostart  # noqa: E402
 import filetransfer  # noqa: E402
+import hostplatform  # noqa: E402
 import customtkinter as ctk  # noqa: E402
 import ui  # noqa: E402
 import protocol as proto  # noqa: E402
@@ -637,23 +638,29 @@ def watch_cursor_and_control(channel, stop, monitor, state):
     """Sendet die Mausposition des Hosts (ca. 30x pro Sekunde, nur bei Änderung)
     und Hinweise, wenn die Steuerung blockiert ist."""
     mouse = MouseController()
+    shapes = hostplatform.CursorShape()
+    shape = "arrow"
     last_pos = None
     last_notice = None
     next_check = 0.0
+    tick = 0
     try:
         while not stop.wait(1 / 30):
+            tick += 1
+            if tick % 3 == 0:  # Zeigerform ca. 10x pro Sekunde
+                shape = shapes.current()
             try:
                 x, y = mouse.position
                 nx = (x - monitor["left"]) / max(1, monitor["width"])
                 ny = (y - monitor["top"]) / max(1, monitor["height"])
                 visible = 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0
-                pos = (round(nx, 4), round(ny, 4), visible)
+                pos = (round(nx, 4), round(ny, 4), visible, shape)
             except Exception:
-                pos = (0.0, 0.0, False)
+                pos = (0.0, 0.0, False, shape)
             if pos != last_pos:
                 last_pos = pos
                 channel.send(proto.MSG_CURSOR, json.dumps(
-                    {"x": pos[0], "y": pos[1], "v": pos[2]}).encode("utf-8"))
+                    {"x": pos[0], "y": pos[1], "v": pos[2], "s": pos[3]}).encode("utf-8"))
             now = time.monotonic()
             if now >= next_check:
                 next_check = now + 2.0
@@ -683,13 +690,31 @@ def run_session(channel, ip, args, monitor):
             log(f"[*] Empfange {filetransfer.describe(data['names'], data['count'])} "
                 f"({filetransfer.human_size(data['bytes'])}) von {ip}")
         elif kind == "done":
+            receiver.dest_dir = None  # nächstes Ablegen braucht wieder ein Ziel
             if data["ok"]:
                 log(f"[+] Dateien abgelegt in {data['folder']}")
-                filetransfer.reveal(data["saved"])  # Ordner auf dem Host öffnen
             else:
                 log(f"[!] Dateiempfang fehlgeschlagen: {data['error']}")
 
-    receiver = filetransfer.Receiver(channel, filetransfer.downloads_dir(), on_files)
+    # Zielordner wird pro Ablegen bestimmt (Ordner unter dem Zeiger), sonst kein Empfang
+    receiver = filetransfer.Receiver(channel, None, on_files)
+
+    def resolve_drop(payload):
+        try:
+            data = json.loads(payload)
+            x, y = executor._to_screen(data["x"], data["y"])
+            executor._move(x, y)  # Zeiger sichtbar dorthin, wo abgelegt wird
+            folder, label, reason = hostplatform.folder_at(x, y)
+        except Exception as exc:
+            folder, label, reason = None, "", f"Ziel konnte nicht ermittelt werden: {exc}"
+        receiver.dest_dir = folder
+        if folder:
+            log(f"[*] Ablegen in {folder}")
+        try:
+            channel.send(proto.MSG_DROP_TARGET, json.dumps(
+                {"ok": bool(folder), "label": label, "reason": reason or ""}).encode("utf-8"))
+        except OSError:
+            pass
     sending = threading.Lock()
 
     def send_offered():
@@ -715,6 +740,9 @@ def run_session(channel, ip, args, monitor):
                 continue
             if msg_type == proto.MSG_FILES_REQUEST:
                 threading.Thread(target=send_offered, daemon=True).start()
+                continue
+            if msg_type == proto.MSG_DROP_QUERY:
+                threading.Thread(target=resolve_drop, args=(payload,), daemon=True).start()
                 continue
             if msg_type == proto.MSG_XFER_ACK:
                 try:

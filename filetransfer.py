@@ -206,6 +206,13 @@ class Receiver:
     def _start(self, data):
         self._close_file()
         total = int(data.get("bytes", 0))
+        if not self.dest_dir:
+            self._xfer = {"id": int(data["id"]), "total": total, "done": 0, "tops": {},
+                          "saved": [], "file": None, "remaining": 0, "failed": "",
+                          "names": data.get("names", []), "count": int(data.get("count", 0)),
+                          "last_event": 0.0}
+            raise OSError("kein Zielordner – Dateien bitte auf den Schreibtisch oder in ein "
+                          "Ordnerfenster ziehen")
         os.makedirs(self.dest_dir, exist_ok=True)
         free = shutil.disk_usage(self.dest_dir).free
         self._xfer = {"id": int(data["id"]), "total": total, "done": 0, "tops": {},

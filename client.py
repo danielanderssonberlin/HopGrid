@@ -236,6 +236,10 @@ class ClientApp:
         self.cmd_as_ctrl = bool(args.cmd_as_ctrl)
         self.share_clipboard = True
         self.show_remote_cursor = True
+        self.follow_cursor_shape = True
+        self.local_shape = None
+        self.menubar = None
+        self.pending_drop = None      # (pfade, namen) bis der Host das Ziel bestätigt
         self.clip_last = None         # zuletzt abgeglichener Text der Zwischenablage
         self.clip_incoming = None     # vom Host empfangener Text (setzt der Hauptthread)
 
@@ -465,6 +469,7 @@ class ClientApp:
         self.cmd_as_ctrl = self.cmd_var.get()
         self.share_clipboard = self.clip_var.get()
         self.show_remote_cursor = self.cursor_var.get()
+        self.follow_cursor_shape = bool(load_settings().get("follow_cursor_shape", True))
         # Einstellungen sofort merken, nicht erst nach erfolgreicher Verbindung
         save_settings({"host": host, "port": port, "user": user,
                        "remember_password": remember, "cmd_as_ctrl": self.cmd_as_ctrl,
@@ -532,6 +537,7 @@ class ClientApp:
 
         self.transfer_bar = ui.TransferBar(self.root)
         self._setup_file_drop()
+        self._build_menu()
 
         self.session_ui = True
         self._attach(channel)
@@ -564,7 +570,7 @@ class ClientApp:
                     try:
                         data = json.loads(payload)
                         self.cursor_incoming = (float(data["x"]), float(data["y"]),
-                                                bool(data["v"]))
+                                                bool(data["v"]), str(data.get("s", "arrow")))
                     except (ValueError, KeyError, TypeError):
                         pass
                     continue
@@ -572,6 +578,12 @@ class ClientApp:
                     self.notice_incoming = payload.decode("utf-8", errors="replace")
                     continue
                 if self.receiver is not None and self.receiver.handle(msg_type, payload):
+                    continue
+                if msg_type == proto.MSG_DROP_TARGET:
+                    try:
+                        self.ui_events.put(("drop_target", json.loads(payload)))
+                    except ValueError:
+                        pass
                     continue
                 if msg_type in (proto.MSG_FILES_OFFER, proto.MSG_XFER_ACK):
                     try:
@@ -629,6 +641,7 @@ class ClientApp:
         if cursor is not None:
             self.remote_pos = cursor
             self._draw_remote_cursor()
+            self._apply_local_cursor(cursor[3])
 
         while True:
             try:
@@ -648,18 +661,71 @@ class ClientApp:
 
         self.root.after(RENDER_INTERVAL_MS, self._render_tick)
 
-    # Pfeil-Umriss (Spitze bei 0,0), etwa 18 px hoch
-    CURSOR_SHAPE = [(0, 0), (0, 17), (4.5, 13), (7.5, 19.5), (10, 18.5), (7, 12), (12.5, 12)]
+    # Zeigerformen als Umriss (Hotspot bei 0,0). Doppelpfeile werden gedreht.
+    _ARROW = [(0, 0), (0, 17), (4.5, 13), (7.5, 19.5), (10, 18.5), (7, 12), (12.5, 12)]
+    _IBEAM = [(-4, -9), (4, -9), (4, -7.5), (1, -7.5), (1, 7.5), (4, 7.5), (4, 9), (-4, 9),
+              (-4, 7.5), (-1, 7.5), (-1, -7.5), (-4, -7.5)]
+    _DOUBLE = [(-11, 0), (-6, -5), (-6, -1.8), (6, -1.8), (6, -5), (11, 0), (6, 5), (6, 1.8),
+               (-6, 1.8), (-6, 5)]
+    _CROSS = [(-1, -10), (1, -10), (1, -1), (10, -1), (10, 1), (1, 1), (1, 10), (-1, 10),
+              (-1, 1), (-10, 1), (-10, -1), (-1, -1)]
+    _ROTATION = {"resize_h": 0, "resize_v": 90, "resize_nwse": 45, "resize_nesw": -45}
+
+    # Tk-Zeigernamen für den lokalen Zeiger über dem Bild (erster passender gewinnt)
+    _LOCAL_CURSORS = {
+        "arrow": ["arrow"],
+        "ibeam": ["ibeam", "xterm"],
+        "hand": ["pointinghand", "hand2"],
+        "resize_h": ["resizeleftright", "sb_h_double_arrow"],
+        "resize_v": ["resizeupdown", "sb_v_double_arrow"],
+        "resize_nwse": ["size_nw_se", "fleur"],
+        "resize_nesw": ["size_ne_sw", "fleur"],
+        "move": ["openhand", "fleur"],
+        "wait": ["watch", "wait"],
+        "busy": ["starting", "watch"],
+        "cross": ["crosshair"],
+        "no": ["notallowed", "no", "X_cursor"],
+        "hidden": ["none", "arrow"],
+    }
+
+    @classmethod
+    def _shape_points(cls, shape):
+        import math
+        if shape == "ibeam":
+            return cls._IBEAM
+        if shape == "cross":
+            return cls._CROSS
+        if shape in cls._ROTATION:
+            angle = math.radians(cls._ROTATION[shape])
+            c, s = math.cos(angle), math.sin(angle)
+            return [(px * c - py * s, px * s + py * c) for px, py in cls._DOUBLE]
+        return cls._ARROW
+
+    def _apply_local_cursor(self, shape):
+        """Lokalen Zeiger über dem Bild an die Form auf dem anderen Rechner anpassen."""
+        if not self.follow_cursor_shape:
+            shape = "arrow"
+        if shape == self.local_shape:
+            return
+        self.local_shape = shape
+        for name in self._LOCAL_CURSORS.get(shape, ["arrow"]):
+            try:
+                self.canvas.configure(cursor=name)
+                return
+            except tk.TclError:
+                continue
 
     def _draw_remote_cursor(self):
-        """Mauszeiger des Hosts an seiner Position über das Bild zeichnen."""
+        """Mauszeiger des Hosts in seiner aktuellen Form über das Bild zeichnen."""
         pos = getattr(self, "remote_pos", None)
-        if pos is None or not self.view or not self.show_remote_cursor:
+        if pos is None or not self.view:
             return
-        nx, ny, visible = pos
+        nx, ny, visible, shape = pos
+        if not self.show_remote_cursor or shape == "hidden":
+            visible = False
         ox, oy, dw, dh = self.view
         x, y = ox + nx * dw, oy + ny * dh
-        points = [coord for px, py in self.CURSOR_SHAPE for coord in (x + px, y + py)]
+        points = [coord for px, py in self._shape_points(shape) for coord in (x + px, y + py)]
         if self.remote_cursor is None:
             self.remote_cursor = self.canvas.create_polygon(
                 points, fill="white", outline="black", width=1.2)
@@ -788,6 +854,9 @@ class ClientApp:
         if self.transfer_bar is not None:
             self.transfer_bar.hide()
             self.transfer_bar = None
+        self._remove_menu()
+        self.local_shape = None
+        self.pending_drop = None
         self.receiver = None
         self.canvas.destroy()
         self.current_frame = self.latest_frame = self.photo = self.view = None
@@ -796,6 +865,70 @@ class ClientApp:
         self.pressed_keys.clear()
         self.root.title("HopGrid – Verbinden")
         self._build_login(message)
+
+    # ----------------------------- Menü während der Verbindung -----------------------------
+    def _build_menu(self):
+        """Menü 'Verbindung': Einstellungen ändern, ohne die Verbindung zu trennen."""
+        self.menu_vars = {
+            "show_remote_cursor": tk.BooleanVar(value=self.show_remote_cursor),
+            "follow_cursor_shape": tk.BooleanVar(value=self.follow_cursor_shape),
+            "share_clipboard": tk.BooleanVar(value=self.share_clipboard),
+            "cmd_as_ctrl": tk.BooleanVar(value=self.cmd_as_ctrl),
+        }
+        bar = tk.Menu(self.root)
+        menu = tk.Menu(bar, tearoff=0)
+        labels = [("show_remote_cursor", "Mauszeiger des anderen Rechners anzeigen"),
+                  ("follow_cursor_shape", "Zeigerform übernehmen (z. B. beim Größe ändern)"),
+                  ("share_clipboard", "Zwischenablage teilen"),
+                  ("cmd_as_ctrl", "Cmd-/Windows-Taste als Strg senden")]
+        for key, text in labels:
+            menu.add_checkbutton(label=text, variable=self.menu_vars[key],
+                                 command=lambda k=key: self._on_setting_changed(k))
+        menu.add_separator()
+        menu.add_command(label="Dateien senden …", command=lambda: self._pick_and_send(False))
+        menu.add_command(label="Ordner senden …", command=lambda: self._pick_and_send(True))
+        menu.add_separator()
+        menu.add_command(label="Verbindung trennen", command=self._disconnect)
+        bar.add_cascade(label="Verbindung", menu=menu)
+        tk.Tk.configure(self.root, menu=bar)
+        self.menubar = bar
+
+    def _remove_menu(self):
+        if getattr(self, "menubar", None) is not None:
+            try:
+                tk.Tk.configure(self.root, menu="")
+                self.menubar.destroy()
+            except tk.TclError:
+                pass
+            self.menubar = None
+
+    def _on_setting_changed(self, key):
+        value = bool(self.menu_vars[key].get())
+        setattr(self, key, value)
+        if key == "show_remote_cursor":
+            self._draw_remote_cursor()
+        elif key == "follow_cursor_shape":
+            self.local_shape = None
+            shape = self.remote_pos[3] if self.remote_pos else "arrow"
+            self._apply_local_cursor(shape)
+        settings = load_settings()
+        settings[key] = value
+        save_settings(settings)
+
+    def _pick_and_send(self, folder):
+        """Dateien/Ordner auswählen und dorthin senden, wo der Zeiger drüben gerade steht."""
+        from tkinter import filedialog
+        if folder:
+            path = filedialog.askdirectory(parent=self.root, title="Ordner senden")
+            paths = [path] if path else []
+        else:
+            paths = list(filedialog.askopenfilenames(parent=self.root, title="Dateien senden"))
+        if paths and self.remote_pos is not None:
+            self._request_drop(paths, self.remote_pos[0], self.remote_pos[1])
+
+    def _disconnect(self):
+        if messagebox.askokcancel("HopGrid", "Verbindung trennen?", parent=self.root):
+            self._end_session("")
 
     # ----------------------------- Dateien -----------------------------
     def _setup_file_drop(self):
@@ -830,15 +963,34 @@ class ClientApp:
         if not self.running or self.reconnecting:
             self.transfer_bar.show("Gerade keine Verbindung – bitte gleich noch einmal.", "error")
             return event.action
-        if self.sending_files:
-            self.transfer_bar.show("Es läuft schon eine Übertragung – bitte warten.", "error")
+        x = event.x_root - self.canvas.winfo_rootx()
+        y = event.y_root - self.canvas.winfo_rooty()
+        pos = self.to_normalized(x, y)
+        if pos is None:
+            self.transfer_bar.show("Bitte direkt auf das Bild des anderen Rechners ziehen.",
+                                   "error", hide_after=5000)
             return event.action
-        self.sending_files = True
-        names = [os.path.basename(p.rstrip(os.sep)) for p in paths]
-        self.transfer_bar.show(f"Sende {filetransfer.describe(names, len(paths))} …", "progress",
-                               fraction=0.0)
-        threading.Thread(target=self._send_files, args=(paths, names), daemon=True).start()
+        self._request_drop(paths, *pos)
         return event.action
+
+    def _request_drop(self, paths, nx, ny):
+        """Host fragen, welcher Ordner unter dem Zeiger liegt. Gesendet wird erst danach."""
+        if self.sending_files or self.pending_drop is not None:
+            self.transfer_bar.show("Es läuft schon eine Übertragung – bitte warten.", "error")
+            return
+        names = [os.path.basename(p.rstrip(os.sep)) for p in paths]
+        self.pending_drop = (paths, names)
+        self.transfer_bar.show("Prüfe, wohin abgelegt wird …", "progress", fraction=0.0)
+        self._send(proto.MSG_DROP_QUERY, json.dumps({"x": nx, "y": ny}).encode("utf-8"))
+
+    def _start_upload(self, label):
+        paths, names = self.pending_drop
+        self.pending_drop = None
+        self.sending_files = True
+        self.upload_label = label
+        self.transfer_bar.show(f"Kopiere {filetransfer.describe(names, len(paths))} nach "
+                               f"„{label}“ …", "progress", fraction=0.0)
+        threading.Thread(target=self._send_files, args=(paths, names), daemon=True).start()
 
     def _send_files(self, paths, names):
         def progress(done, total):
@@ -858,8 +1010,9 @@ class ClientApp:
         if kind == "send_progress":
             _, names, done, total = item
             pct = done / total if total else 1.0
-            bar.show(f"Sende {filetransfer.describe(names, len(names))} … {int(pct * 100)} %",
-                     "progress", fraction=pct)
+            label = getattr(self, "upload_label", "")
+            bar.show(f"Kopiere {filetransfer.describe(names, len(names))} nach „{label}“ … "
+                     f"{int(pct * 100)} %", "progress", fraction=pct)
         elif kind == "send_error":
             self.sending_files = False
             bar.show(f"Senden abgebrochen: {item[1]}", "error")
@@ -867,11 +1020,22 @@ class ClientApp:
             self.sending_files = False
             data = item[1]
             if data.get("ok"):
-                bar.show("Auf dem anderen Rechner in Downloads › HopGrid abgelegt.", "success",
+                label = getattr(self, "upload_label", "") or "Zielordner"
+                bar.show(f"Auf dem anderen Rechner in „{label}“ abgelegt.", "success",
                          hide_after=6000)
             else:
                 bar.show(f"Der andere Rechner konnte die Dateien nicht speichern: "
                          f"{data.get('error')}", "error")
+        elif kind == "drop_target":
+            data = item[1]
+            if self.pending_drop is None:
+                return
+            if data.get("ok"):
+                self._start_upload(str(data.get("label") or "Zielordner"))
+            else:
+                self.pending_drop = None
+                bar.show(str(data.get("reason") or "Dort kann nichts abgelegt werden."), "error",
+                         hide_after=9000)
         elif kind == "offer":
             data = item[1]
             if int(data.get("count", 0)) > 0:
