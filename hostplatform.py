@@ -187,6 +187,23 @@ SETTINGS_URLS = {
 }
 
 
+def app_location_problem():
+    """macOS: Läuft die App nicht aus /Applications (oder aus einem versteckten
+    Quarantäne-Ordner), merkt sich macOS die Rechte oft nicht zuverlässig."""
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return None
+    exe = os.path.realpath(sys.executable)
+    app = exe.split("/Contents/MacOS/")[0]
+    if "/AppTranslocation/" in exe or not app.startswith("/Applications/"):
+        return app
+    return None
+
+
+def reveal_app():
+    app = os.path.realpath(sys.executable).split("/Contents/MacOS/")[0]
+    subprocess.Popen(["open", "-R", app])
+
+
 def open_settings(kind):
     if sys.platform == "darwin" and kind in SETTINGS_URLS:
         subprocess.Popen(["open", SETTINGS_URLS[kind]])

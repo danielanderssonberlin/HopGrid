@@ -1246,6 +1246,7 @@ class HostWindow:
             self.f_pw.entry.focus_set()
         root.after(150, self.poll_queues)
         hostplatform.main_state.start(root)
+        root.after(500, self._refresh_permissions)
 
         if autostart_launch:
             if self.saved_creds is not None and self._begin(
@@ -1458,6 +1459,10 @@ class HostWindow:
             return
         main = hostplatform.main_state
         missing = []
+        if hostplatform.app_location_problem():
+            missing.append(("location", "Speicherort",
+                            "HopGrid in den Ordner „Programme“ ziehen und von dort starten – "
+                            "sonst vergisst macOS die Rechte"))
         if self.server is not None:
             if not main.ax_trusted:
                 missing.append(("accessibility", "Bedienungshilfen",
@@ -1477,20 +1482,25 @@ class HostWindow:
             return
         self.perm_frame = ctk.CTkFrame(self.status_inner, fg_color=ui.WARN_BG, corner_radius=8)
         self.perm_frame.pack(fill="x", pady=(ui.S3, 0))
-        ui.label(self.perm_frame, "macOS-Rechte fehlen für diese HopGrid-Version", "h3",
+        ui.label(self.perm_frame, "macOS braucht noch etwas", "h3",
                  ui.WARN_TEXT, anchor="w").pack(anchor="w", padx=ui.S3, pady=(ui.S2 + 2, 2))
-        ui.label(self.perm_frame, "In der Liste HopGrid einschalten. Steht HopGrid schon drin: "
-                                  "mit dem Minus entfernen und mit dem Plus neu hinzufügen.", "small",
-                 ui.WARN_TEXT, anchor="w", justify="left", wraplength=420
-                 ).pack(anchor="w", padx=ui.S3, pady=(0, ui.S2))
+        if any(kind != "location" for kind, _t, _w in missing):
+            ui.label(self.perm_frame, "In der Liste HopGrid einschalten. Steht HopGrid schon drin: "
+                                      "mit dem Minus entfernen und mit dem Plus neu hinzufügen.",
+                     "small", ui.WARN_TEXT, anchor="w", justify="left", wraplength=420
+                     ).pack(anchor="w", padx=ui.S3, pady=(0, ui.S2))
         for kind, title, why in missing:
             row = ctk.CTkFrame(self.perm_frame, fg_color="transparent")
             row.pack(fill="x", padx=ui.S3, pady=(0, ui.S2))
             ui.label(row, f"{title} – {why}", "small", ui.WARN_TEXT, anchor="w", justify="left",
                      wraplength=270).pack(side="left", fill="x", expand=True)
-            ui.secondary_button(row, "Einstellung öffnen",
-                                lambda k=kind: hostplatform.open_settings(k), height=30, width=140
-                                ).pack(side="right")
+            if kind == "location":
+                ui.secondary_button(row, "Im Finder zeigen", hostplatform.reveal_app,
+                                    height=30, width=140).pack(side="right")
+            else:
+                ui.secondary_button(row, "Einstellung öffnen",
+                                    lambda k=kind: hostplatform.open_settings(k), height=30,
+                                    width=140).pack(side="right")
         self.fit_window()
 
     def stop(self):
