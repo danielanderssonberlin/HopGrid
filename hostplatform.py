@@ -143,6 +143,7 @@ class MainThreadState:
         self.shape = "arrow"
         self.files = []
         self.ax_trusted = True
+        self.screen_ok = True
         self._shapes = None
 
     def start(self, root, interval_ms=100):
@@ -163,6 +164,11 @@ class MainThreadState:
                     self.ax_trusted = bool(AXIsProcessTrusted())
                 except ImportError:
                     pass
+                try:
+                    import Quartz
+                    self.screen_ok = bool(Quartz.CGPreflightScreenCaptureAccess())
+                except (ImportError, AttributeError):
+                    pass
         except Exception:
             pass
         try:
@@ -172,6 +178,18 @@ class MainThreadState:
 
 
 main_state = MainThreadState()
+
+# Direkt zur passenden Seite der Systemeinstellungen
+SETTINGS_URLS = {
+    "accessibility": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    "screen": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    "automation": "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation",
+}
+
+
+def open_settings(kind):
+    if sys.platform == "darwin" and kind in SETTINGS_URLS:
+        subprocess.Popen(["open", SETTINGS_URLS[kind]])
 
 
 # ---------------------------------------------------------------------------

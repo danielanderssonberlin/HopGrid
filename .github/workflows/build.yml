@@ -63,6 +63,12 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASS" "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # Eigenes (nicht von Apple ausgestelltes) Zertifikat fürs Signieren vertrauen
+          /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" -nokeys -passin "pass:$P12_PASSWORD" \
+            -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+          security find-identity -v -p codesigning
       - name: Build
         env:
           MAC_SIGN_IDENTITY: ${{ secrets.MAC_SIGN_IDENTITY }}

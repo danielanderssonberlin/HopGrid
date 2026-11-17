@@ -1447,11 +1447,51 @@ class HostWindow:
         hints = check_macos_permissions()
         for hint in hints:
             log(f"[!] {hint}")
-        if hints:
-            self.show_error("macOS-Freigaben fehlen – Details im Protokoll.")
-            if not self.log_section.is_open:
-                self.log_section.toggle()
+        self._last_perm_state = None
+        self._refresh_permissions()
         return True
+
+    def _refresh_permissions(self):
+        """macOS: fehlende Rechte mit Knopf zur passenden Einstellung anzeigen.
+        Verschwindet von selbst, sobald das Recht erteilt ist."""
+        if sys.platform != "darwin":
+            return
+        main = hostplatform.main_state
+        missing = []
+        if self.server is not None:
+            if not main.ax_trusted:
+                missing.append(("accessibility", "Bedienungshilfen",
+                                "nötig, damit Maus und Tastatur ankommen"))
+            if not main.screen_ok:
+                missing.append(("screen", "Bildschirmaufnahme",
+                                "nötig, damit das Bild ankommt – danach HopGrid neu starten"))
+        state = tuple(m[0] for m in missing)
+        if state == getattr(self, "_last_perm_state", None):
+            return
+        self._last_perm_state = state
+        if getattr(self, "perm_frame", None) is not None:
+            self.perm_frame.destroy()
+            self.perm_frame = None
+        if not missing:
+            self.fit_window()
+            return
+        self.perm_frame = ctk.CTkFrame(self.status_inner, fg_color=ui.WARN_BG, corner_radius=8)
+        self.perm_frame.pack(fill="x", pady=(ui.S3, 0))
+        ui.label(self.perm_frame, "macOS-Rechte fehlen für diese HopGrid-Version", "h3",
+                 ui.WARN_TEXT, anchor="w").pack(anchor="w", padx=ui.S3, pady=(ui.S2 + 2, 2))
+        ui.label(self.perm_frame, "In der Liste HopGrid einschalten. Steht HopGrid schon drin: "
+                                  "mit dem Minus entfernen und mit dem Plus neu hinzufügen.", "small",
+                 ui.WARN_TEXT, anchor="w", justify="left", wraplength=420
+                 ).pack(anchor="w", padx=ui.S3, pady=(0, ui.S2))
+        for kind, title, why in missing:
+            row = ctk.CTkFrame(self.perm_frame, fg_color="transparent")
+            row.pack(fill="x", padx=ui.S3, pady=(0, ui.S2))
+            ui.label(row, f"{title} – {why}", "small", ui.WARN_TEXT, anchor="w", justify="left",
+                     wraplength=270).pack(side="left", fill="x", expand=True)
+            ui.secondary_button(row, "Einstellung öffnen",
+                                lambda k=kind: hostplatform.open_settings(k), height=30, width=140
+                                ).pack(side="right")
+        self.fit_window()
 
     def stop(self):
         self.stop_event.set()
@@ -1466,6 +1506,7 @@ class HostWindow:
         self.show_error("")
         self._set_running_ui(False)
         log("[*] Freigabe gestoppt")
+        self._refresh_permissions()
 
     # ----------------------------- Navigation / Beenden -----------------------------
     def go_back(self):
@@ -1540,6 +1581,9 @@ class HostWindow:
     def poll_queues(self):
         if not self.alive:
             return
+        self._poll_count = getattr(self, "_poll_count", 0) + 1
+        if self._poll_count % 7 == 0:  # ca. 1x pro Sekunde
+            self._refresh_permissions()
         while True:
             try:
                 item = self.ui_queue.get_nowait()
