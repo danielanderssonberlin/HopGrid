@@ -132,6 +132,48 @@ class CursorShape:
         return "arrow"
 
 
+class MainThreadState:
+    """macOS: AppKit- und Eingabe-Systemfunktionen dürfen nur im Hauptthread laufen,
+    sonst beendet macOS die App (SIGTRAP). Im Fenster-Modus fragt der Hauptthread
+    Zeigerform, kopierte Dateien und die Bedienungshilfen-Freigabe regelmäßig ab;
+    die Verbindungs-Threads lesen nur die Ergebnisse."""
+
+    def __init__(self):
+        self.active = False
+        self.shape = "arrow"
+        self.files = []
+        self.ax_trusted = True
+        self._shapes = None
+
+    def start(self, root, interval_ms=100):
+        if sys.platform != "darwin" or self.active:
+            return
+        self._shapes = CursorShape()
+        self.active = True
+        self._tick(root, interval_ms, 0)
+
+    def _tick(self, root, interval_ms, n):
+        try:
+            self.shape = self._shapes.current()
+            if n % 7 == 0:  # seltener: Zwischenablage und Freigabe
+                from filetransfer import clipboard_files
+                self.files = clipboard_files()
+                try:
+                    from ApplicationServices import AXIsProcessTrusted
+                    self.ax_trusted = bool(AXIsProcessTrusted())
+                except ImportError:
+                    pass
+        except Exception:
+            pass
+        try:
+            root.after(interval_ms, self._tick, root, interval_ms, n + 1)
+        except Exception:
+            self.active = False
+
+
+main_state = MainThreadState()
+
+
 # ---------------------------------------------------------------------------
 # Ordner unter dem Zeiger
 # ---------------------------------------------------------------------------

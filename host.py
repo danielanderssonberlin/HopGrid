@@ -297,7 +297,9 @@ class InputExecutor:
     def __init__(self, monitor):
         self.monitor = monitor
         self.mouse = MouseController()
-        self.keyboard = KeyboardController()
+        # macOS: pynput-Tastatur fragt beim Anlegen das Layout über TIS ab – außerhalb des
+        # Hauptthreads beendet macOS dafür die App. Auf dem Mac tippt MacKeyboard (Quartz).
+        self.keyboard = None if sys.platform == "darwin" else KeyboardController()
         self.mac_mouse = MacMouse() if sys.platform == "darwin" else None
         self.mac_keyboard = MacKeyboard() if sys.platform == "darwin" else None
         self.pressed_keys = set()
@@ -408,7 +410,8 @@ class InputExecutor:
                 pass
         for key in list(self.pressed_keys):
             try:
-                self.keyboard.release(key)
+                if self.keyboard is not None:
+                    self.keyboard.release(key)
             except Exception:
                 pass
         self.pressed_keys.clear()
@@ -521,7 +524,7 @@ class ClipboardSync:
         self.stop = stop
         self._lock = threading.Lock()
         self.offered_files = []      # in Finder/Explorer kopierte Dateien (Angebot an den Client)
-        self._last_files = filetransfer.clipboard_files()
+        self._last_files = self._clipboard_files()
         threading.Thread(target=self._watch_files, daemon=True).start()
         try:
             import pyperclip
@@ -550,11 +553,17 @@ class ClipboardSync:
                 except OSError:
                     return
 
+    @staticmethod
+    def _clipboard_files():
+        if hostplatform.main_state.active:
+            return list(hostplatform.main_state.files)
+        return filetransfer.clipboard_files()
+
     def _watch_files(self):
         """Kopiert jemand auf dem Host Dateien (Cmd/Strg+C im Finder/Explorer), wird
         dem Client angeboten, sie zu holen."""
         while not self.stop.wait(0.7):
-            files = filetransfer.clipboard_files()
+            files = self._clipboard_files()
             if files == self._last_files:
                 continue
             self._last_files = files
@@ -607,8 +616,12 @@ def control_problem(state):
     """Warum die Steuerung gerade nicht ankommt – oder '' wenn alles passt."""
     if sys.platform == "darwin":
         try:
-            from ApplicationServices import AXIsProcessTrusted
-            if not AXIsProcessTrusted():
+            if hostplatform.main_state.active:
+                trusted = hostplatform.main_state.ax_trusted
+            else:
+                from ApplicationServices import AXIsProcessTrusted
+                trusted = AXIsProcessTrusted()
+            if not trusted:
                 return ("Steuerung blockiert: Auf dem Host fehlt die Freigabe „Bedienungshilfen“. "
                         "Dort unter Systemeinstellungen › Datenschutz & Sicherheit › "
                         "Bedienungshilfen HopGrid entfernen (–) und neu hinzufügen (+).")
@@ -638,7 +651,8 @@ def watch_cursor_and_control(channel, stop, monitor, state):
     """Sendet die Mausposition des Hosts (ca. 30x pro Sekunde, nur bei Änderung)
     und Hinweise, wenn die Steuerung blockiert ist."""
     mouse = MouseController()
-    shapes = hostplatform.CursorShape()
+    main = hostplatform.main_state
+    shapes = None if main.active else hostplatform.CursorShape()
     shape = "arrow"
     last_pos = None
     last_notice = None
@@ -648,7 +662,7 @@ def watch_cursor_and_control(channel, stop, monitor, state):
         while not stop.wait(1 / 30):
             tick += 1
             if tick % 3 == 0:  # Zeigerform ca. 10x pro Sekunde
-                shape = shapes.current()
+                shape = main.shape if main.active else shapes.current()
             try:
                 x, y = mouse.position
                 nx = (x - monitor["left"]) / max(1, monitor["width"])
@@ -1231,6 +1245,7 @@ class HostWindow:
         elif self.saved_creds is None:
             self.f_pw.entry.focus_set()
         root.after(150, self.poll_queues)
+        hostplatform.main_state.start(root)
 
         if autostart_launch:
             if self.saved_creds is not None and self._begin(
